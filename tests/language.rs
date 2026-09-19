@@ -177,6 +177,35 @@ fn nested_closures_keep_required_outer_values_and_local_snapshots() {
 }
 
 #[test]
+fn dynamic_evaluation_reads_and_updates_function_bindings() {
+    evaluates("f:{[a] value \"a+1\"};f[41]", "42");
+    evaluates("f:{[a] value \"y:5\"; y};f[1]", "5");
+    evaluates("f:{[a] b:1; value \"b:9\"; b};f[0]", "9");
+    evaluates("f:{[a] g:value; g \"a*2\"};f[21]", "42");
+    evaluates("f:{[a] .`a};f[7]", "7");
+    evaluates("f:{[a] value \"q:3\"; value `q};f[4]", "3");
+    evaluates(
+        "f:{[a] value \"z:1\"; value \"z:z+1\"; value \"z\"};f[0]",
+        "2",
+    );
+    evaluates("f:{[a] value \"f\"};f[1]~f", "1");
+    evaluates("f:{[f] value \"f\"};f[1]", "1");
+    evaluates("f:{[a] value \":a*10\"; 99};f[2]", "20");
+    evaluates("f:{[a] b:1 2 3; @[`b;0;+;10]; b};f[0]", "11 2 3");
+    evaluates("f:{[a] b:1 2 3; .[`b;();:;7]; b};f[0]", "7");
+    evaluates("f:{[a] value \"g:{[] a}\"; a:9; g[]};f[3]", "3");
+    evaluates("a:9;f:{[] value \"a:1\"; a};f[]", "1");
+    evaluates("a:9;f:{[] value \"a:1\"};f[];a", "9");
+    // Evaluated text sees the function's bindings, not uncaptured globals.
+    assert_eq!(
+        Interpreter::new()
+            .eval("a:5;f:{[] value \"a\"};f[]")
+            .unwrap_err(),
+        "undefined name: a"
+    );
+}
+
+#[test]
 fn closures_release_unneeded_outer_values() {
     use std::rc::Rc;
 

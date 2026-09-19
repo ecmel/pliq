@@ -1,4 +1,4 @@
-use super::display::{cell, single_line};
+use super::display::{cell, single_line, total};
 use super::*;
 
 impl Table {
@@ -276,11 +276,23 @@ impl Table {
     }
 }
 
-/// Render a table as aligned rows without padding or changing its shared arrays.
-impl fmt::Display for Table {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let rows = self.len();
-        let columns: Vec<_> = self
+impl Table {
+    /// Aligned rows under a header and rule. With fewer console rows than the
+    /// table needs, the first rows followed by `..` and the row count. Column
+    /// widths come from the rows shown.
+    pub(super) fn render(
+        &self,
+        f: &mut impl fmt::Write,
+        rows: usize,
+        columns: usize,
+    ) -> fmt::Result {
+        let count = self.len();
+        let shown = if count.saturating_add(2) <= rows {
+            count
+        } else {
+            rows.saturating_sub(4)
+        };
+        let table: Vec<_> = self
             .columns()
             .into_iter()
             .map(|(name, array)| {
@@ -289,8 +301,8 @@ impl fmt::Display for Table {
                 } else {
                     single_line(&name)
                 };
-                let cells: Vec<_> = (0..rows)
-                    .map(|row| cell(&array.get(row).unwrap_or(Value::Null)))
+                let cells: Vec<_> = (0..shown)
+                    .map(|row| cell(&array.get(row).unwrap_or(Value::Null), columns))
                     .collect();
                 let width = cells
                     .iter()
@@ -302,39 +314,49 @@ impl fmt::Display for Table {
                 (header, cells, width, numeric)
             })
             .collect();
-        for (i, (header, _, width, _)) in columns.iter().enumerate() {
+        for (i, (header, _, width, _)) in table.iter().enumerate() {
             if i > 0 {
                 write!(f, " ")?;
             }
-            if i + 1 == columns.len() {
+            if i + 1 == table.len() {
                 write!(f, "{header}")?;
             } else {
                 write!(f, "{header:<width$}")?;
             }
         }
         writeln!(f)?;
-        for (i, (_, _, width, _)) in columns.iter().enumerate() {
+        for (i, (_, _, width, _)) in table.iter().enumerate() {
             if i > 0 {
                 write!(f, " ")?;
             }
             write!(f, "{}", "-".repeat(*width))?;
         }
-        for row in 0..rows {
+        for row in 0..shown {
             writeln!(f)?;
-            for (i, (_, cells, width, numeric)) in columns.iter().enumerate() {
+            for (i, (_, cells, width, numeric)) in table.iter().enumerate() {
                 if i > 0 {
                     write!(f, " ")?;
                 }
                 let cell = &cells[row];
                 if *numeric {
                     write!(f, "{cell:>width$}")?;
-                } else if i + 1 == columns.len() {
+                } else if i + 1 == table.len() {
                     write!(f, "{cell}")?;
                 } else {
                     write!(f, "{cell:<width$}")?;
                 }
             }
         }
+        if shown < count {
+            write!(f, "\n..\n{}", total(count, "row", "rows"))?;
+        }
         Ok(())
+    }
+}
+
+/// Render a table as aligned rows without padding or changing its shared arrays.
+impl fmt::Display for Table {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.render(f, usize::MAX, usize::MAX)
     }
 }

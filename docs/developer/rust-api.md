@@ -3,7 +3,7 @@
 [Developer guide](index.md) · [Architecture](architecture.md) · [Development](development.md)
 
 The crate exports `Interpreter`, `Value`, `Number`, `Array`, `Dictionary`,
-`MutableString`, `Table`, and `Result<T>`. The result alias is
+`MutableString`, `Table`, `Console`, `View`, and `Result<T>`. The result alias is
 `std::result::Result<T, String>`. Use a local path dependency from a host project;
 the crate is not published to a registry.
 
@@ -61,6 +61,27 @@ shares it. `Value::array(iter)` returns a `Result` from an iterator of values; n
 all-character inputs become strings. Use `Value::Array(array)` to wrap an
 `Array` explicitly. Internal helpers such as `Value::text`, `as_text`, and
 `detached` are not public APIs.
+
+## Console display
+
+`value.view(Console { rows, columns })` returns a `View` whose `Display` shows
+the value as the REPL does: tables and dictionaries as aligned rows, other
+values in compact syntax. Zero leaves a dimension unlimited;
+`Console::UNLIMITED` shows everything, as `pliq -e` does. Lines wider than
+`columns` end in `..`. Output taller than `rows` ends in a `..` line, and tables
+and dictionaries add their row or entry count. Only the part that fits is
+rendered.
+
+```rust
+use pliq::{Console, Interpreter};
+
+fn main() -> pliq::Result<()> {
+    let table = Interpreter::new().eval("([] a:!10)")?;
+    let shown = table.view(Console { rows: 5, columns: 80 }).to_string();
+    assert_eq!(shown, "a\n-\n0\n..\n10 rows");
+    Ok(())
+}
+```
 
 ## Numbers
 

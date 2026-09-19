@@ -6,10 +6,12 @@ use std::{
     rc::Rc,
 };
 
-use crate::{MutableString, Number, Result, parser::Expr};
+use crate::{MutableString, Number, Result, compile::Proto};
 
 mod display;
 mod table;
+
+pub use display::{Console, View};
 
 pub(crate) type Environment = Rc<HashMap<String, Value>>;
 
@@ -426,7 +428,8 @@ impl Array {
         };
         Self::from_storage(storage)
     }
-    fn snapshot(&self) -> Self {
+    /// A new array sharing this array's current storage.
+    pub(crate) fn snapshot(&self) -> Self {
         Self::from_storage(self.0.borrow().clone())
     }
     /// Materialize a non-null numeric snapshot; nullable arrays return None.
@@ -442,11 +445,8 @@ impl Array {
             _ => None,
         }
     }
-    pub(crate) fn binary(&self, other: &Self, op: char) -> Option<Result<Self>> {
-        let left = self.numeric_snapshot()?;
-        let right = other.numeric_snapshot()?;
-        left.binary(&right, op)
-            .map(|result| result.map(|xs| Self::from_storage(Storage::Numbers(xs))))
+    pub(crate) fn from_numbers(numbers: crate::arrow::Numbers) -> Self {
+        Self::from_storage(Storage::Numbers(numbers))
     }
     /// Export a stable Arrow snapshot without copying numeric or symbol buffers.
     /// Nested and other runtime values are not yet supported by this boundary.
@@ -731,10 +731,12 @@ pub(crate) enum FunctionKind {
     Composition(Value, Value),
     Derived(char, Value),
     User {
-        name: Option<String>,
-        params: Rc<Vec<String>>,
-        body: Rc<Vec<Expr>>,
-        env: Environment,
+        name: Option<Rc<str>>,
+        proto: Rc<Proto>,
+        /// Values for `proto.free`; names unbound at creation are None.
+        captures: Vec<Option<Value>>,
+        /// The slot that calls bind to the function itself.
+        self_slot: Option<usize>,
     },
 }
 
@@ -857,7 +859,9 @@ impl Value {
                     }
                 }
                 Self::Function(f) => match &f.kind {
-                    FunctionKind::User { env, .. } => pending.extend(env.values().cloned()),
+                    FunctionKind::User { captures, .. } => {
+                        pending.extend(captures.iter().flatten().cloned())
+                    }
                     FunctionKind::Derived(_, value) => pending.push(value.clone()),
                     FunctionKind::Projection(f, args) => {
                         pending.push(f.clone());
@@ -1058,23 +1062,22 @@ impl Value {
                         }
                         (
                             FunctionKind::User {
-                                params: a,
-                                body: ab,
-                                env: ae,
+                                proto: a,
+                                captures: ac,
                                 ..
                             },
                             FunctionKind::User {
-                                params: b,
-                                body: bb,
-                                env: be,
+                                proto: b,
+                                captures: bc,
                                 ..
                             },
                         ) => {
-                            a == b
-                                && ab == bb
-                                && ae.len() == be.len()
-                                && ae.iter().all(|(key, value)| {
-                                    be.get(key).is_some_and(|other| value.same(other))
+                            (Rc::ptr_eq(a, b) || a.same_source(b))
+                                && ac.len() == bc.len()
+                                && ac.iter().zip(bc).all(|pair| match pair {
+                                    (Some(a), Some(b)) => a.same(b),
+                                    (None, None) => true,
+                                    _ => false,
                                 })
                         }
                         _ => false,

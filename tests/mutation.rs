@@ -172,6 +172,15 @@ fn indexed_assignment_follows_right_to_left_evaluation() {
 }
 
 #[test]
+fn literals_are_new_containers_on_every_evaluation() {
+    check("f:{[] v:1 2 3;r:v[0];v[0]:9;r};(f[];f[])", "1 1");
+    check("f:{[] v:`a`b;v,:`c;#v};(f[];f[])", "3 3");
+    check("f:{[] e:();e,:1;#e};(f[];f[])", "1 1");
+    check("f:{[] v:(+;-);v[0]:*;v[0][2;3]};(f[];f[])", "6 6");
+    check("f:{[] s:\"ab\";r:s[0];s[0]:\"z\";r};(f[];f[])", "\"aa\"");
+}
+
+#[test]
 fn closures_and_function_arguments_share_mutable_containers() {
     check("a:1 2;f:{[]a[0]};a[0]:9;f[]", "9");
     check("a:1 2;f:{a[0]:x};f[9];a", "9 2");

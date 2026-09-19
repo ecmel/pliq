@@ -22,6 +22,7 @@ cargo test --release
 cargo fmt --check
 cargo clippy --all-targets -- -D warnings
 cargo doc --no-deps
+cargo bench
 ```
 
 `cargo fmt` applies formatting. The release binary is `target/release/pliq`
@@ -31,7 +32,8 @@ cargo doc --no-deps
 The prose documentation uses mdBook. See [documentation maintenance](documentation.md)
 for installation, `mdbook build`, local preview, and GitHub Pages deployment.
 
-See [testing](testing.md) for regression suites and verification guidance.
+See [testing](testing.md) for regression suites, benchmarks, and verification
+guidance.
 
 ## Source map
 
@@ -41,7 +43,8 @@ See [testing](testing.md) for regression suites and verification guidance.
 | [src/main.rs](https://github.com/ecmel/pliq/blob/main/src/main.rs)           | CLI, line-based REPL, continuation detection                    |
 | [src/net.rs](https://github.com/ecmel/pliq/blob/main/src/net.rs)             | Frame codec, TCP daemon, attached REPL client           |
 | [src/parser.rs](https://github.com/ecmel/pliq/blob/main/src/parser.rs)       | Byte-oriented lexer, tokens, expression tree, parser            |
-| [src/eval.rs](https://github.com/ecmel/pliq/blob/main/src/eval.rs)           | Persistent interpreter, environments, evaluation, application   |
+| [src/compile.rs](https://github.com/ecmel/pliq/blob/main/src/compile.rs)     | Name resolution, frame slots, closure captures, constant nodes  |
+| [src/eval.rs](https://github.com/ecmel/pliq/blob/main/src/eval.rs)           | Persistent interpreter, call frames, evaluation, application    |
 | [src/operators.rs](https://github.com/ecmel/pliq/blob/main/src/operators.rs) | Structured primitives, casts, iterators, amend, random sampling |
 | [src/number.rs](https://github.com/ecmel/pliq/blob/main/src/number.rs)       | Numeric representations, arithmetic, comparison, display        |
 | [src/arrow.rs](https://github.com/ecmel/pliq/blob/main/src/arrow.rs)         | Arrow vector storage, validity, and arithmetic kernels          |
@@ -50,6 +53,7 @@ See [testing](testing.md) for regression suites and verification guidance.
 | [src/value/display.rs](https://github.com/ecmel/pliq/blob/main/src/value/display.rs) | Control-character escaping, cell rendering, aligned dictionary output |
 | [src/string.rs](https://github.com/ecmel/pliq/blob/main/src/string.rs)       | Shared mutable byte-string storage                              |
 | [tests](https://github.com/ecmel/pliq/tree/main/tests)                       | Integration suites and unit-test support files                  |
+| [benches](https://github.com/ecmel/pliq/tree/main/benches)                   | Interpreter benchmarks                                          |
 | [examples](https://github.com/ecmel/pliq/tree/main/examples)                 | Runnable language examples                                      |
 | [docs](../index.md)                                                          | User and developer documentation                                |
 

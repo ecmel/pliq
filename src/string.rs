@@ -10,6 +10,10 @@ impl MutableString {
     pub fn new(bytes: impl AsRef<[u8]>) -> Self {
         Self(Rc::new(RefCell::new(Rc::new(bytes.as_ref().to_vec()))))
     }
+    /// A new string sharing bytes until either side is edited.
+    pub(crate) fn shared(bytes: Rc<Vec<u8>>) -> Self {
+        Self(Rc::new(RefCell::new(bytes)))
+    }
     pub fn len(&self) -> usize {
         self.0.borrow().len()
     }

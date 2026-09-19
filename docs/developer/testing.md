@@ -28,10 +28,11 @@ framework; keep reference calculations and regression tests in Rust.
 | [symbols.rs](https://github.com/ecmel/pliq/blob/main/tests/symbols.rs)                                     | Symbol values, display, ordering, invalid syntax                                       |
 | [dictionaries.rs](https://github.com/ecmel/pliq/blob/main/tests/dictionaries.rs)                           | Construction, lookup, keys, display, Rust API                                          |
 | [mutation.rs](https://github.com/ecmel/pliq/blob/main/tests/mutation.rs)                                   | Shared updates, nested containers, cycle rejection, failure preservation               |
+| [console.rs](https://github.com/ecmel/pliq/blob/main/tests/console.rs)                                     | Console-size views: cut lines, row and entry counts, unlimited display                 |
 | [cli.rs](https://github.com/ecmel/pliq/blob/main/tests/cli.rs)                                             | Command arguments, stdin/files, output, exit status                                    |
 | [support/number_reference.rs](https://github.com/ecmel/pliq/blob/main/tests/support/number_reference.rs)   | Independent arithmetic reference and signed boundaries, included by numeric unit tests |
 | [support/parser_robustness.rs](https://github.com/ecmel/pliq/blob/main/tests/support/parser_robustness.rs) | Mutated parser inputs, included by parser unit tests                                   |
-| [support/repl.rs](https://github.com/ecmel/pliq/blob/main/tests/support/repl.rs)                           | Scripted REPL behavior, included by CLI unit tests                                     |
+| [support/repl.rs](https://github.com/ecmel/pliq/blob/main/tests/support/repl.rs)                           | Scripted REPL behavior and console-size commands, included by CLI unit tests           |
 | [support/net.rs](https://github.com/ecmel/pliq/blob/main/tests/support/net.rs)                             | Frame codec, socket serving, shared sessions, attached clients, included by transport unit tests |
 
 ## Add a regression
@@ -45,6 +46,29 @@ failure preservation where relevant. For arithmetic, extend the independent
 reference cases and signed boundaries. Random sampling tests should assert
 bounds, count, and uniqueness of dealt positions rather than a particular
 random sequence.
+
+## Benchmarks
+
+[benches/interpreter.rs](https://github.com/ecmel/pliq/blob/main/benches/interpreter.rs)
+times representative programs: user-function calls, closures, recursion,
+evaluated text, and whole-array primitives. It uses no benchmark framework.
+
+```sh
+cargo bench
+cargo bench -- closure
+```
+
+Each benchmark runs its setup code once, then evaluates its program repeatedly
+in the same interpreter for about half a second (5 to 100 samples) and reports
+the median and minimum time. Every run checks the program's result, so a
+benchmark cannot time an error by mistake. `cargo test --benches` runs each
+program once as a smoke test.
+
+To measure a change, run `cargo bench` on the base commit and on the change on
+an otherwise idle machine, then compare medians. Function-call benchmarks
+measure the evaluator; whole-array benchmarks mostly measure Arrow kernels.
+Add a benchmark with its expected result when a change targets a workload the
+suite does not cover.
 
 ## Coverage
 

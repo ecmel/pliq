@@ -4,15 +4,17 @@
 
 pliq is a Rust array language with an Apache Arrow backend.
 `src/lib.rs` exports the interpreter API; `src/main.rs` implements the CLI and
-REPL. The lexer/parser lives in `src/parser.rs`, evaluation and operators in
-`src/eval.rs` and `src/operators.rs`, native numeric arithmetic in `src/number.rs`,
+REPL. The lexer/parser lives in `src/parser.rs`, name resolution into frame
+slots in `src/compile.rs`, evaluation and operators in `src/eval.rs` and
+`src/operators.rs`, native numeric arithmetic in `src/number.rs`,
 Arrow storage and kernels in `src/arrow.rs`, runtime values and shared arrays in
 `src/value.rs`, and shared byte strings in `src/string.rs`. The Unix socket
 daemon and its attached REPL client live in `src/net.rs`.
 
 Integration tests live in `tests/`; `tests/support/` contains Rust reference
 arithmetic, parser mutation tests, and scripted REPL tests included by unit-test
-modules. Runnable programs use `.pliq` files in `examples/`. Language documentation
+modules. Interpreter benchmarks live in `benches/interpreter.rs`. Runnable
+programs use `.pliq` files in `examples/`. Language documentation
 starts at `docs/index.md`, with mdBook navigation in `docs/SUMMARY.md` and
 configuration in `book.toml`. `README.md` is a short overview; testing
 and verification are in `docs/developer/testing.md`.
@@ -30,6 +32,7 @@ Use Rust 1.88 or newer, with edition 2024.
 - `cargo test --release`: verify optimized arithmetic and execution.
 - `cargo fmt --check`: check formatting; use `cargo fmt` to apply it.
 - `cargo clippy --all-targets -- -D warnings`: require clean lint output.
+- `cargo bench`: run the interpreter benchmarks; `cargo bench -- NAME` filters them.
 - `mdbook build`: build the documentation into `target/book` (requires mdBook).
 
 ## Coding Style & Naming Conventions
@@ -53,7 +56,8 @@ syntax changes.
 Use Rust's built-in `#[test]` framework and descriptive behavior-based names.
 Add regression cases to the relevant language, numbers, strings, or CLI suite.
 Arithmetic changes should also exercise the independent reference implementation and signed
-boundaries. Run debug and release tests for arithmetic or evaluator changes.
+boundaries. Run debug and release tests for arithmetic or evaluator changes, and
+compare `cargo bench` results before and after performance changes.
 
 With cargo-llvm-cov and llvm-tools installed:
 

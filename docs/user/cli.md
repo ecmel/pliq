@@ -49,20 +49,55 @@ prints its last result. Bindings persist between inputs.
 | Command | Effect |
 | --- | --- |
 | `\h` | Show command help; retain pending input and bindings |
-| `\c` | Discard pending multiline input; retain existing bindings |
+| `\c` | Show the console size for results |
+| `\c rows columns` | Set the size: 5 to 1000 rows and at least 20 columns; `0` for the most |
+| `\c auto` | Return to the default size |
+| `\d` | Discard pending multiline input; retain existing bindings |
 | `\q` | Discard pending input and exit |
 
 These commands must occupy the input line. They are REPL commands, not language
-expressions usable inside a source file. `\c` does not reset the interpreter;
-start a new process for a fresh environment. Lines such as `:c`, `:h`, and `:q`
-remain language expressions, including early returns inside multiline functions.
+expressions usable inside a source file. `\d` does not reset the interpreter;
+start a new process for a fresh environment. Lines such as `:c`, `:d`, `:h`, and
+`:q` remain language expressions, including early returns inside multiline
+functions.
+
+## Console size
+
+A REPL result never shows more than 1000 rows. In a terminal it also fits the
+terminal's width, measured again for each result so a resized window takes
+effect; scrolling back covers the height. A line cut at the width ends in `..`. A table or
+dictionary with more rows than fit shows its first rows, then `..` and its row
+or entry count:
+
+```text
+  \c 6 30
+  !1000
+0 1 2 3 4 5 6 7 8 9 10 11 12..
+  ([] price:!100)
+price
+-----
+    0
+    1
+..
+100 rows
+```
+
+`\c rows columns` sets a fixed size of 5 to 1000 rows and at least 20 columns.
+`0` rows means 1000 and `0` columns removes the width limit, so `\c 0 0` shows
+up to 1000 rows at any width. `\c` alone prints the current size, marked
+`(auto)` for the default, and `\c auto` restores it. Only the part that fits is
+rendered, so a large result prints quickly. Error messages are never cut.
+
+To see later rows, index them, as in `t[1000+!1000]`. Output from `-e`, files,
+and piped standard input is never limited. An attached REPL reading piped input
+has no width limit until `\c` sets one.
 
 ## Multiline input
 
 An unclosed `(`, `[`, `{`, or quoted string changes the prompt to `..` and reads
 another line. Delimiters in strings and comments are ignored. Mismatched closing
 delimiters are sent to the parser for an error instead of causing indefinite
-continuation. Use `\c` to cancel a partly entered expression.
+continuation. Use `\d` to cancel a partly entered expression.
 
 EOF exits normally when there is no pending source. EOF during an incomplete
 expression produces an error. An ordinary evaluation error is printed to stderr
@@ -109,8 +144,9 @@ state[`hits]:state[`hits]+1   // visible to every session
 n:n+1                         // rebinding; local to this expression
 ```
 
-`\h`, `\c`, and `\q` behave as they do in the local REPL, except that `\q`
-detaches and leaves the daemon running. Stop the daemon itself with a signal,
+`\h`, `\c`, `\d`, and `\q` behave as they do in the local REPL, except that
+`\q` detaches and leaves the daemon running. Each session sends its own console
+size with each request, and the daemon renders results to fit it. Stop the daemon itself with a signal,
 such as Ctrl-C in its own terminal.
 
 ### TCP addresses and access
@@ -140,9 +176,15 @@ responses are length-prefixed frames:
 | kind | 1 | Request mode, or response tag |
 | payload | length - 1 | UTF-8 source, or printed output |
 
-Request mode `0` sends source text and returns its printed result; modes `1`
-and `2` are reserved for later encodings. Response tag `0` carries a result and
-`1` carries an error message.
+Request mode `0` sends source text and returns its printed result. Mode `3`
+does the same within a console size: its payload starts with the rows and then
+the columns as little-endian `u32` values, with `0` for no limit, followed by
+the source text. Modes `1` and `2` are reserved for later encodings. Response
+tag `0` carries a result and `1` carries an error message.
+
+An attached REPL sends mode `3`. When a daemon from version 0.1.0 answers
+`unsupported request mode: 3`, the REPL repeats that request in mode `0` and
+keeps using mode `0` for the rest of the session.
 
 There is no handshake and no authentication step: connect and send. Requests on
 one connection are answered in order, one at a time, and each request receives
@@ -188,6 +230,7 @@ Frames are limited to 16 MiB in each direction.
 | Source that fails to parse or evaluate | Tag `1` with the error message |
 | Payload that is not valid UTF-8 | Tag `1` |
 | Unrecognized request mode | Tag `1` |
+| Mode `3` payload shorter than its 8-byte size | Tag `1` |
 | Result larger than the frame limit | Tag `1` reporting the size |
 | Request frame with an invalid length | The daemon closes the connection |
 | Daemon stopped | The connection closes and reads return no data |

@@ -29,7 +29,8 @@ cargo run
 ```
 
 The last command starts the REPL when stdin is a terminal.
-Use `\h` for help, `\c` to discard pending input, and `\q` to exit.
+Use `\h` for help, `\c` to show or set the console size, `\d` to discard
+pending input, and `\q` to exit.
 
 ## Documentation
 

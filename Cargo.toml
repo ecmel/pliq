@@ -10,8 +10,31 @@ publish = false
 [package.metadata]
 authors = ["Ecmel Ercan"]
 
+# Only benches/ runs under `cargo bench`; unit tests stay in `cargo test`.
+[lib]
+bench = false
+
+[[bin]]
+name = "pliq"
+path = "src/main.rs"
+bench = false
+
+[[bench]]
+name = "interpreter"
+harness = false
+
+# Measured with `cargo bench`: "s" ran interpreted function calls faster than
+# level 3 and halved the binary; recheck both when changing these settings.
+[profile.release]
+lto = "fat"
+codegen-units = 1
+panic = "abort"
+strip = true
+opt-level = "s"
+
 [dependencies]
 arrow-arith = "58"
 arrow-array = "58"
+arrow-buffer = "58"
 arrow-schema = "58"
 rustyline = { version = "18", default-features = false, features = ["with-file-history"] }

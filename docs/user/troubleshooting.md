@@ -15,7 +15,8 @@
 | `unexpected character ... syntax is ASCII` | Variable syntax uses ASCII letters/digits; put arbitrary text inside a string. |
 | `mutation would create a reference cycle` | A replacement reaches its destination through a container or captured function. Store acyclic data. |
 | Decimal output has extra digits | Floats are binary approximations. Use `round` where explicit rounding is appropriate. |
-| A REPL prompt changes to `..` | Complete the open delimiter/string, or use `\c`. |
+| A REPL prompt changes to `..` | Complete the open delimiter/string, or use `\d`. |
+| A REPL result ends in `..` or a row count | The console size cut it. `\c 0 0` removes the width limit; the REPL shows at most 1000 rows, so index later rows, as in `t[1000+!1000]`, or print with `pliq -e`. |
 
 The minus sign is spacing-sensitive. `1 -2` is a vector containing a negative
 literal; `1-2` is subtraction. Both `+/x` and `+ /x` reduce; only `//` starts a

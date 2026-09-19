@@ -8,7 +8,8 @@
 CLI / REPL / socket client / Rust caller
     -> Interpreter::eval(source)
     -> lexer and parser -> expression tree
-    -> evaluator + persistent environment
+    -> name resolution -> nodes with function frame slots
+    -> evaluator + persistent environment + call-frame stack
     -> operator / numeric / collection operations
     -> Result<Value, String>
     -> display or host-side inspection
@@ -20,11 +21,19 @@ assignment, returns, projections, and lazy conditionals. Newline handling
 depends on the containing delimiter. Both syntax nesting and evaluator
 application have depth guards.
 
-Each `Interpreter::eval` parses the complete source before executing it and
-creates an evaluator for that call. The interpreter retains its environment
-between calls. Statements execute in order; expression/application evaluation
-preserves the language's right-to-left rules. The final statement supplies the
-result. No bytecode compiler or JIT is involved.
+Each `Interpreter::eval` parses and resolves the complete source before
+executing it and creates an evaluator for that call. Resolution turns the
+expression tree into evaluation nodes: top-level names stay names in the
+persistent environment, while each function literal becomes a shared prototype
+whose names are numbered frame slots. Primitives become shared function values,
+and applications of a primitive to all of its operands skip the function value.
+Numeric strands and constant lists keep a prebuilt buffer; each evaluation
+still creates a new mutable array that shares it until an update.
+
+The interpreter retains its environment between calls. Statements execute in
+order; expression/application evaluation preserves the language's right-to-left
+rules. The final statement supplies the result. The evaluator walks the resolved
+nodes; no bytecode compiler or JIT is involved.
 
 ## Socket transport
 
@@ -41,21 +50,39 @@ each other's shared-container mutations, and one long-running request delays
 every other session.
 
 Requests carry a mode byte and responses a tag byte, so further encodings can
-be added without changing the framing. See
+be added without changing the framing. Attached REPLs use a mode that carries
+their console size, so the daemon renders only the part of a result that each
+session will show. See
 [CLI and REPL](../user/cli.md#connecting-from-other-programs) for the frame
 layout.
 
 ## Environments and functions
 
-An environment is an `Rc<HashMap<String, Value>>`. Binding updates use
-`Rc::make_mut`, separating maps when needed without copying the mutable
-containers inside their values.
+Top-level code uses the persistent environment, an `Rc<HashMap<String, Value>>`.
+Binding updates use `Rc::make_mut`, separating maps when needed without copying
+the mutable containers inside their values.
 
-Free-name analysis records referenced outer bindings for a closure. It accounts
-for assignment order, branches, and nested lambdas. Captures keep their lexical
-values when an outer name is rebound. Named user functions bind their own name
-during a call to support recursion without storing a reference cycle in the
-captured environment.
+Function bodies use call frames instead. Resolution numbers every name a body
+binds or reads: parameters first, then captured and local names. A call pushes
+one slot per name onto the evaluator's value stack and truncates the stack on
+return, so reading or assigning a local is an index rather than a hash lookup,
+and a call copies no environment.
+
+Free-name analysis records the outer names a closure reads before assigning
+them. It accounts for assignment order, branches, and nested lambdas, and runs
+once per function literal during resolution. Creating a closure copies the
+current values of those names into its captures; names unbound at that point
+stay unbound. Captures keep their lexical values when an outer name is rebound.
+Assigning an anonymous function to a name makes calls bind that name to the
+function itself, supporting recursion without storing a reference cycle in the
+captures.
+
+Text evaluated by a direct `value` or `.` call can read, rebind, and create
+names in the calling function. For that evaluation, the frame's bound slots
+form a temporary environment. Afterwards, names with slots are written back, and
+other new names stay with the frame for later evaluated text. Like the function
+body, evaluated text sees parameters, locals, and captures, not uncaptured
+globals. Frames without evaluated text pay nothing for this.
 
 Function values distinguish binary verbs, explicit unary primitives, named
 native functions, user functions, projections, compositions, and iterator-derived
@@ -115,7 +142,7 @@ Failed updates restore the index and depth together with the ordered arrays.
 ## Memory management
 
 pliq manages memory automatically through Rust's reference counting (`Rc`).
-Shared arrays, dictionaries, strings, functions, and captured environments stay
+Shared arrays, dictionaries, strings, functions, and closure captures stay
 alive while references to them exist. When the last strong reference to an
 allocation is dropped, Rust releases it and drops the values it owns. This can
 release further allocations whose reference counts also reach zero.

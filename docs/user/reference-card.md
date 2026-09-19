@@ -105,4 +105,5 @@ pliq --help
 ```
 
 No arguments start the REPL when stdin is a terminal. REPL commands are
-`\h`, `\c`, and `\q`. See [CLI and REPL](cli.md).
+`\h`, `\c` (console size), `\d` (discard input), and `\q`. See
+[CLI and REPL](cli.md).

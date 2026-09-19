@@ -1,9 +1,11 @@
-use std::{collections::HashSet, rc::Rc};
+use std::{collections::HashMap, rc::Rc};
 
 use crate::{
-    Array, Dictionary, Number, Result, Table, Value,
-    parser::{self, Expr},
-    value::{ArrayBuilder, Environment, FunctionKind},
+    Array, Dictionary, MutableString, Number, Result, Table, Value,
+    arrow::Operand,
+    compile::{self, Node, Var},
+    parser,
+    value::{ArrayBuilder, Environment, Function, FunctionKind},
 };
 
 /// A persistent environment. Each evaluation returns the last statement's value.
@@ -25,104 +27,37 @@ impl Interpreter {
     }
 
     pub fn eval(&mut self, source: &str) -> Result<Value> {
-        let body = parser::parse(source)?;
-        let mut evaluator = Evaluator {
-            depth: 0,
-            returning: None,
-        };
-        let result = evaluator.body(&body, &mut self.env);
+        let body = compile::program(&parser::parse(source)?);
+        let mut evaluator = Evaluator::default();
+        let result = evaluator.body(&body, &mut Scope::Global(&mut self.env));
         evaluator.returning.take().map_or(result, Ok)
     }
 }
 
+#[derive(Default)]
 pub(crate) struct Evaluator {
     depth: usize,
     pub(crate) returning: Option<Value>,
+    /// Slots of the active call frames, innermost last.
+    stack: Vec<Option<Value>>,
+    /// Names that dynamic evaluation bound in each frame without a slot.
+    frames: Vec<Option<HashMap<String, Value>>>,
 }
 
-fn capture_environment(params: &[String], body: &[Expr], env: &Environment) -> Environment {
-    let mut bound = params.iter().map(String::as_str).collect();
-    let mut free = HashSet::new();
-    for expr in body {
-        free_names(expr, &mut bound, &mut free);
-    }
-    Rc::new(
-        free.into_iter()
-            .filter_map(|name| env.get(name).map(|value| (name.to_owned(), value.clone())))
-            .collect(),
-    )
+/// Where names resolve while evaluating compiled nodes.
+pub(crate) enum Scope<'a> {
+    Global(&'a mut Environment),
+    /// A call frame whose slots start at `base` in the evaluator's stack.
+    Local {
+        base: usize,
+        frame: usize,
+        function: &'a Rc<Function>,
+    },
 }
 
-// Track definitely assigned names in evaluation order. Nested functions need
-// their own bindings, but their free names must survive in the outer closure.
-fn free_names<'a>(expr: &'a Expr, bound: &mut HashSet<&'a str>, free: &mut HashSet<&'a str>) {
-    match expr {
-        Expr::Name(name) => {
-            if !bound.contains(name.as_str()) {
-                free.insert(name);
-            }
-        }
-        Expr::Assign(name, value) => {
-            free_names(value, bound, free);
-            bound.insert(name);
-        }
-        Expr::Update(name, indices, value) => {
-            free_names(value, bound, free);
-            for index in indices.iter().rev() {
-                free_names(index, bound, free);
-            }
-            if !bound.contains(name.as_str()) {
-                free.insert(name);
-            }
-        }
-        Expr::Append(target, value) | Expr::Modify(target, _, value) => {
-            free_names(value, bound, free);
-            free_names(target, bound, free);
-        }
-        Expr::Table(columns) => {
-            for (_, value) in columns.iter().rev() {
-                free_names(value, bound, free);
-            }
-        }
-        Expr::Array(values) | Expr::Strand(values) => {
-            for value in values.iter().rev() {
-                free_names(value, bound, free);
-            }
-        }
-        Expr::Call(function, args) => {
-            for arg in args.iter().rev() {
-                free_names(arg, bound, free);
-            }
-            free_names(function, bound, free);
-        }
-        Expr::Derived(_, function) | Expr::Return(function) => free_names(function, bound, free),
-        Expr::If(condition, yes, no) => {
-            free_names(condition, bound, free);
-            let mut yes_bound = bound.clone();
-            free_names(yes, &mut yes_bound, free);
-            free_names(no, bound, free);
-            bound.retain(|name| yes_bound.contains(name));
-        }
-        Expr::Lambda(params, body) => {
-            let mut local = bound.clone();
-            local.extend(params.iter().map(String::as_str));
-            for expr in body {
-                free_names(expr, &mut local, free);
-            }
-        }
-        Expr::Null
-        | Expr::Number(_)
-        | Expr::Text(_)
-        | Expr::Hole
-        | Expr::Symbol(_)
-        | Expr::Verb(_)
-        | Expr::Monadic(_) => {}
-    }
-}
+pub(crate) type Arithmetic = fn(&Number, &Number) -> Result<Number>;
 
-type Arithmetic = fn(&Number, &Number) -> Result<Number>;
-
-fn arithmetic(op: char) -> Option<Arithmetic> {
+pub(crate) fn arithmetic(op: char) -> Option<Arithmetic> {
     match op {
         '+' => Some(Number::add),
         '-' => Some(Number::subtract),
@@ -132,306 +67,436 @@ fn arithmetic(op: char) -> Option<Arithmetic> {
     }
 }
 
-// Only immutable numeric leaves qualify: evaluating these cannot mutate bindings,
-// invoke another function, or return early. Everything else uses the usual frame.
-fn numeric_argument(expr: &Expr, params: &[String], args: &[Value]) -> Option<Number> {
-    match expr {
-        Expr::Number(n) => Some(*n),
-        Expr::Name(name) => {
-            let index = params.iter().rposition(|param| param == name)?;
-            match args[index] {
-                Value::Number(n) => Some(n),
-                _ => None,
-            }
+fn undefined(name: &str) -> String {
+    format!("undefined name: {name}")
+}
+
+/// Assigning an anonymous function names it. Calls then bind the name to the
+/// function itself for recursion, so the closure drops any captured value.
+fn name_function(value: Value, name: &Rc<str>) -> Value {
+    if let Value::Function(f) = &value
+        && let FunctionKind::User {
+            name: None,
+            proto,
+            captures,
+            ..
+        } = &f.kind
+    {
+        let mut captures = captures.clone();
+        if let Some(i) = proto
+            .free
+            .iter()
+            .position(|&slot| proto.names[slot] == *name)
+        {
+            captures[i] = None;
         }
-        _ => None,
+        return Value::function(FunctionKind::User {
+            name: Some(name.clone()),
+            proto: proto.clone(),
+            captures,
+            self_slot: proto.slot(name).filter(|&slot| slot >= proto.params),
+        });
     }
+    value
 }
 
 impl Evaluator {
-    fn body(&mut self, body: &[Expr], env: &mut Environment) -> Result<Value> {
-        let mut result = Value::array([])?;
-        for expr in body {
-            result = self.eval(expr, env)?;
+    pub(crate) fn body(&mut self, body: &[Node], scope: &mut Scope) -> Result<Value> {
+        let Some((last, init)) = body.split_last() else {
+            return Value::array([]);
+        };
+        for node in init {
+            self.eval(node, scope)?;
         }
-        Ok(result)
+        self.eval(last, scope)
     }
-    fn eval(&mut self, expr: &Expr, env: &mut Environment) -> Result<Value> {
-        match expr {
-            Expr::Null => Ok(Value::Null),
-            Expr::Number(n) => Ok(Value::from_number(*n)),
-            Expr::Text(text) => Ok(if text.len() == 1 {
-                Value::Char(text[0])
-            } else {
-                Value::text(text)
-            }),
-            Expr::Hole => Err("argument placeholder outside a call".into()),
-            Expr::Return(expr) => {
-                let value = self.eval(expr, env)?;
-                self.returning = Some(value);
-                Err("return".into())
+    fn eval(&mut self, node: &Node, scope: &mut Scope) -> Result<Value> {
+        match node {
+            Node::Const(value) => Ok(value.clone()),
+            Node::Name(var) => self.read(var, scope),
+            Node::Dyad(op, operands) => {
+                let y = self.eval(&operands.1, scope)?;
+                let x = self.eval(&operands.0, scope)?;
+                self.nested(|this| this.dyad(*op, &x, &y))
             }
-            Expr::Modify(target, op, expr) => {
-                let right = self.eval(expr, env)?;
-                let mut base = target.as_ref();
-                let mut selectors = Vec::new();
-                while let Expr::Call(f, args) = base {
+            Node::Monad(op, operand) => {
+                let y = self.eval(operand, scope)?;
+                self.nested(|this| this.monad(*op, &y))
+            }
+            Node::Call(function, args, false) => match args.as_slice() {
+                [] => {
+                    let function = self.eval(function, scope)?;
+                    self.call(&function, &[], scope)
+                }
+                [x] => {
+                    let x = self.eval(x, scope)?;
+                    let function = self.eval(function, scope)?;
+                    self.call(&function, &[x], scope)
+                }
+                [x, y] => {
+                    let y = self.eval(y, scope)?;
+                    let x = self.eval(x, scope)?;
+                    let function = self.eval(function, scope)?;
+                    self.call(&function, &[x, y], scope)
+                }
+                args => {
+                    let mut values = Vec::with_capacity(args.len());
                     for arg in args.iter().rev() {
-                        selectors.push(self.eval(arg, env)?);
+                        values.push(self.eval(arg, scope)?);
                     }
-                    base = f;
+                    values.reverse();
+                    let function = self.eval(function, scope)?;
+                    self.call(&function, &values, scope)
                 }
-                selectors.reverse();
-                let Expr::Name(name) = base else {
-                    return Err("assignment target must be a variable or indexed variable".into());
-                };
-                let container = env
-                    .get(name)
-                    .cloned()
-                    .ok_or_else(|| format!("undefined name: {name}"))?;
-                if selectors.is_empty() {
-                    let result = self.dyad(*op, &container, &right)?;
-                    Rc::make_mut(env).insert(name.clone(), result.clone());
-                    Ok(result)
-                } else {
-                    let amended = container.detached();
-                    self.amend_path(
-                        &amended,
-                        &selectors,
-                        &Value::function(FunctionKind::Verb(*op)),
-                        Some(&right),
-                    )?;
-                    let replacement = index_depth(&amended, &selectors)?;
-                    container.update(&selectors, &replacement)?;
-                    Ok(replacement)
-                }
-            }
-            Expr::Symbol(name) => Ok(Value::Symbol(name.clone())),
-            Expr::Strand(xs) => {
-                let mut values = xs
-                    .iter()
-                    .map(|x| self.eval(x, env))
-                    .collect::<Result<Vec<_>>>()?;
-                if values
-                    .iter()
-                    .any(|v| matches!(v, Value::Number(Number::Float(_))))
-                {
-                    for value in &mut values {
-                        if let Value::Number(n) = value {
-                            *n = Number::Float(n.as_f64());
-                        }
-                    }
-                }
-                Ok(Value::array(values)?)
-            }
-            Expr::Table(columns) => {
-                let mut values = Vec::with_capacity(columns.len());
-                for (name, expression) in columns.iter().rev() {
-                    let Value::Array(column) = self.eval(expression, env)? else {
-                        return Err(format!("table column {name} must be an array"));
-                    };
-                    values.push((Rc::from(name.as_str()), column));
-                }
-                values.reverse();
-                Table::new(values).map(Value::Table)
-            }
-            Expr::Array(xs) => {
-                let values = xs
-                    .iter()
-                    .rev()
-                    .map(|x| self.eval(x, env))
-                    .collect::<Result<Vec<_>>>()
-                    .and_then(Array::new)?;
-                Ok(Value::from_array(values.into_reversed()))
-            }
-            Expr::Name(name) => env
-                .get(name)
-                .cloned()
-                .ok_or_else(|| format!("undefined name: {name}")),
-            Expr::Assign(name, expr) => {
-                let mut value = self.eval(expr, env)?;
-                if let Value::Function(f) = &value
-                    && let FunctionKind::User {
-                        name: None,
-                        params,
-                        body,
-                        env,
-                    } = &f.kind
-                {
-                    let mut captured = env.clone();
-                    // Calls bind the function's own name before running its body.
-                    if captured.contains_key(name) {
-                        Rc::make_mut(&mut captured).remove(name);
-                    }
-                    value = Value::function(FunctionKind::User {
-                        name: Some(name.clone()),
-                        params: params.clone(),
-                        body: body.clone(),
-                        env: captured,
-                    });
-                }
-                Rc::make_mut(env).insert(name.clone(), value.clone());
-                Ok(value)
-            }
-            Expr::Monadic(op) => Ok(Value::function(FunctionKind::Monadic(*op))),
-            Expr::Verb(op) => Ok(Value::function(FunctionKind::Verb(*op))),
-            Expr::Update(name, indices, expr) => {
-                let value = self.eval(expr, env)?;
-                let mut selectors = Vec::with_capacity(indices.len());
-                for index in indices.iter().rev() {
-                    selectors.push(self.eval(index, env)?);
-                }
-                selectors.reverse();
-                let target = env
-                    .get(name)
-                    .ok_or_else(|| format!("undefined name: {name}"))?;
-                target.update(&selectors, &value)?;
-                Ok(value)
-            }
-            Expr::Derived(adverb, expr) => {
-                let function = self.eval(expr, env)?;
-                if !matches!(function, Value::Function(_)) {
-                    return Err("adverbs require a function".into());
-                }
-                Ok(Value::function(FunctionKind::Derived(*adverb, function)))
-            }
-            Expr::Append(target, expr) => {
-                let value = self.eval(expr, env)?;
-                let target = self.eval(target, env)?;
-                match &target {
-                    Value::Array(array) => array.append(value)?,
-                    Value::Table(table) => match value {
-                        Value::Table(source) => table.append(&source)?,
-                        _ => return Err("table append requires a table".into()),
-                    },
-                    Value::String(string) => {
-                        let bytes = match value {
-                            Value::Char(c) => vec![c],
-                            Value::String(s) => s.snapshot().as_ref().clone(),
-                            _ => return Err("string append requires a character or string".into()),
-                        };
-                        string.append(bytes);
-                    }
-                    _ => return Err("in-place append requires an array or string".into()),
-                }
-                Ok(target)
-            }
-            Expr::Lambda(params, body) => Ok(Value::function(FunctionKind::User {
-                name: None,
-                params: Rc::new(params.clone()),
-                body: Rc::new(body.clone()),
-                env: capture_environment(params, body, env),
-            })),
-            Expr::If(condition, yes, no) => {
-                let condition = self.eval(condition, env)?;
+            },
+            Node::Call(function, args, true) => self.project(function, args, scope),
+            Node::If(condition, yes, no) => {
+                let condition = self.eval(condition, scope)?;
                 self.eval(
                     if matches!(condition, Value::Null) || !number(&condition)?.is_zero() {
                         yes
                     } else {
                         no
                     },
-                    env,
+                    scope,
                 )
             }
-            Expr::Call(function, args) => {
-                let mut values = Vec::with_capacity(args.len());
-                for (index, arg) in args.iter().enumerate().rev() {
-                    values.push(if matches!(arg, Expr::Hole) {
-                        None
-                    } else if matches!(function.as_ref(), Expr::Verb('!'))
-                        && args.len() == 2
-                        && index == 1
-                        && let Expr::Array(entries) = arg
-                    {
-                        // The explicit value list of a dictionary may be mixed.
-                        // Evaluate entries right to left, just like ordinary lists.
-                        let mut entries = entries
-                            .iter()
-                            .rev()
-                            .map(|entry| self.eval(entry, env))
-                            .collect::<Result<Vec<_>>>()?;
-                        entries.reverse();
-                        Some(Value::Array(Array::dictionary_values(entries)))
-                    } else {
-                        Some(self.eval(arg, env)?)
-                    });
+            Node::Assign(var, value) => {
+                let value = name_function(self.eval(value, scope)?, var.name());
+                self.store(var, value.clone(), scope);
+                Ok(value)
+            }
+            Node::Lambda(proto, sources) => Ok(Value::function(FunctionKind::User {
+                name: None,
+                proto: proto.clone(),
+                captures: sources.iter().map(|var| self.lookup(var, scope)).collect(),
+                self_slot: None,
+            })),
+            Node::Vector(array) => Ok(Value::Array(array.snapshot())),
+            Node::Text(text) => Ok(Value::String(MutableString::shared(text.clone()))),
+            Node::Return(value) => {
+                let value = self.eval(value, scope)?;
+                self.returning = Some(value);
+                // The enclosing call takes the value; this message is never shown.
+                Err(String::new())
+            }
+            Node::Derived(adverb, function) => {
+                let function = self.eval(function, scope)?;
+                if !matches!(function, Value::Function(_)) {
+                    return Err("adverbs require a function".into());
                 }
-                values.reverse();
-                let function = self.eval(function, env)?;
-                if let Value::Function(f) = &function {
-                    if matches!(
-                        f.kind,
-                        FunctionKind::Monadic('.') | FunctionKind::Native("value")
-                    ) && values.len() == 1
-                    {
-                        if let Some(Value::Symbol(name)) = &values[0] {
-                            return env
-                                .get(name.as_ref())
-                                .cloned()
-                                .ok_or_else(|| format!("undefined name: {name}"));
-                        }
-                        if let Some(source) = values[0].as_ref().and_then(Value::as_text) {
-                            return self.body(&parser::parse(&source)?, env);
-                        }
-                    }
-                    if let FunctionKind::Verb(op @ ('@' | '.')) = f.kind
-                        && values.len() >= 3
-                        && values.len() <= 4
-                        && values.iter().all(Option::is_some)
-                        && let Some(Value::Symbol(name)) = &values[0]
-                    {
-                        let target = env
-                            .get(name.as_ref())
-                            .cloned()
-                            .ok_or_else(|| format!("undefined name: {name}"))?;
-                        let selector = values[1].as_ref().unwrap();
-                        let amended = self.amend_or_trap(
-                            op,
-                            &target,
-                            selector,
-                            values[2].as_ref().unwrap(),
-                            values.get(3).and_then(Option::as_ref),
-                        )?;
-                        let selectors = if op == '.' {
-                            items(selector).iter().collect::<Vec<_>>()
-                        } else {
-                            vec![selector.clone()]
-                        };
-                        if selectors.is_empty() {
-                            Rc::make_mut(env).insert(name.to_string(), amended);
-                        } else {
-                            target.update(&selectors, &index_depth(&amended, &selectors)?)?;
-                        }
-                        return Ok(Value::Symbol(name.clone()));
-                    }
+                Ok(Value::function(FunctionKind::Derived(*adverb, function)))
+            }
+            Node::Hole => Err("argument placeholder outside a call".into()),
+            Node::Strand(xs) => compile::strand(
+                xs.iter()
+                    .map(|x| self.eval(x, scope))
+                    .collect::<Result<Vec<_>>>()?,
+            ),
+            Node::Array(xs) => {
+                let values = self.values(xs, scope)?;
+                Ok(Value::from_array(Array::new(values)?))
+            }
+            Node::Entries(xs) => {
+                let values = self.values(xs, scope)?;
+                Ok(Value::Array(Array::dictionary_values(values)))
+            }
+            Node::Table(columns) => self.table(columns, scope),
+            Node::Update(var, indices, value) => self.update(var, indices, value, scope),
+            Node::Append(target, value) => self.append(target, value, scope),
+            Node::Modify(target, op, value) => self.modify(target, *op, value, scope),
+        }
+    }
+    /// Evaluate list elements right to left, returning them in list order.
+    fn values(&mut self, xs: &[Node], scope: &mut Scope) -> Result<Vec<Value>> {
+        let mut values = Vec::with_capacity(xs.len());
+        for x in xs.iter().rev() {
+            values.push(self.eval(x, scope)?);
+        }
+        values.reverse();
+        Ok(values)
+    }
+    fn lookup(&self, var: &Var, scope: &Scope) -> Option<Value> {
+        match (var, scope) {
+            (Var::Local(slot, _), Scope::Local { base, .. }) => self.stack[base + slot].clone(),
+            (Var::Global(name), Scope::Global(env)) => env.get(&**name).cloned(),
+            _ => unreachable!("names resolve in the scope that compiled them"),
+        }
+    }
+    fn read(&self, var: &Var, scope: &Scope) -> Result<Value> {
+        self.lookup(var, scope).ok_or_else(|| undefined(var.name()))
+    }
+    fn store(&mut self, var: &Var, value: Value, scope: &mut Scope) {
+        match (var, scope) {
+            (Var::Local(slot, _), Scope::Local { base, .. }) => {
+                self.stack[*base + slot] = Some(value);
+            }
+            (Var::Global(name), Scope::Global(env)) => {
+                Rc::make_mut(env).insert(name.to_string(), value);
+            }
+            _ => unreachable!("names resolve in the scope that compiled them"),
+        }
+    }
+    /// Look up a name given as data, as `value` and amend by symbol do.
+    fn lookup_name(&self, name: &str, scope: &Scope) -> Option<Value> {
+        match scope {
+            Scope::Global(env) => env.get(name).cloned(),
+            Scope::Local {
+                base,
+                frame,
+                function,
+            } => {
+                let FunctionKind::User {
+                    name: own, proto, ..
+                } = &function.kind
+                else {
+                    unreachable!("frames belong to user functions")
+                };
+                if let Some(slot) = proto.slot(name) {
+                    return self.stack[base + slot].clone();
                 }
-                if values.iter().any(Option::is_none)
-                    && matches!(
-                        function,
-                        Value::Array(_) | Value::String(_) | Value::Dictionary(_) | Value::Table(_)
-                    )
-                {
-                    let indices = values
-                        .into_iter()
-                        .map(|v| v.unwrap_or_else(|| Value::function(FunctionKind::Verb(':'))))
-                        .collect::<Vec<_>>();
-                    index_depth(&function, &indices)
-                } else if values.iter().any(Option::is_none) {
-                    Ok(Value::function(FunctionKind::Projection(function, values)))
-                } else {
-                    self.apply(&function, &values.into_iter().flatten().collect::<Vec<_>>())
+                self.frames[*frame]
+                    .as_ref()
+                    .and_then(|extra| extra.get(name).cloned())
+                    .or_else(|| {
+                        (own.as_deref() == Some(name)).then(|| Value::Function(Rc::clone(function)))
+                    })
+            }
+        }
+    }
+    fn assign_name(&mut self, name: &str, value: Value, scope: &mut Scope) {
+        match scope {
+            Scope::Global(env) => {
+                Rc::make_mut(env).insert(name.to_owned(), value);
+            }
+            Scope::Local {
+                base,
+                frame,
+                function,
+            } => {
+                let FunctionKind::User { proto, .. } = &function.kind else {
+                    unreachable!("frames belong to user functions")
+                };
+                match proto.slot(name) {
+                    Some(slot) => self.stack[*base + slot] = Some(value),
+                    None => {
+                        self.frames[*frame]
+                            .get_or_insert_default()
+                            .insert(name.to_owned(), value);
+                    }
                 }
             }
         }
     }
-    pub(crate) fn apply(&mut self, function: &Value, args: &[Value]) -> Result<Value> {
+    /// Evaluate source text in the current scope. Inside a function, the frame's
+    /// bindings form an environment for the evaluation and are then written back.
+    fn evaluate(&mut self, source: &str, scope: &mut Scope) -> Result<Value> {
+        let body = compile::program(&parser::parse(source)?);
+        let (base, frame, function) = match scope {
+            Scope::Global(env) => return self.body(&body, &mut Scope::Global(env)),
+            Scope::Local {
+                base,
+                frame,
+                function,
+            } => (*base, *frame, *function),
+        };
+        let FunctionKind::User { name, proto, .. } = &function.kind else {
+            unreachable!("frames belong to user functions")
+        };
+        let mut env = HashMap::new();
+        // Parameters and assignments shadow the function's own name.
+        if let Some(name) = name {
+            env.insert(name.to_string(), Value::Function(function.clone()));
+        }
+        for (name, value) in proto.names.iter().zip(&self.stack[base..]) {
+            if let Some(value) = value {
+                env.insert(name.to_string(), value.clone());
+            }
+        }
+        let mut extra = self.frames[frame].take().unwrap_or_default();
+        env.extend(extra.drain());
+        let mut env = Rc::new(env);
+        let result = self.body(&body, &mut Scope::Global(&mut env));
+        for (name, value) in Rc::unwrap_or_clone(env) {
+            match proto.slot(&name) {
+                Some(slot) => self.stack[base + slot] = Some(value),
+                None => {
+                    extra.insert(name, value);
+                }
+            }
+        }
+        self.frames[frame] = Some(extra);
+        result
+    }
+    fn call(&mut self, function: &Value, args: &[Value], scope: &mut Scope) -> Result<Value> {
+        if let Value::Function(f) = function {
+            match (&f.kind, args) {
+                (FunctionKind::Monadic('.') | FunctionKind::Native("value"), [arg]) => {
+                    if let Value::Symbol(name) = arg {
+                        return self.lookup_name(name, scope).ok_or_else(|| undefined(name));
+                    }
+                    if let Some(source) = arg.as_text() {
+                        return self.evaluate(&source, scope);
+                    }
+                }
+                (
+                    FunctionKind::Verb(op @ ('@' | '.')),
+                    [Value::Symbol(name), selector, f, rest @ ..],
+                ) if rest.len() <= 1 => {
+                    return self.amend_name(*op, name, selector, f, rest.first(), scope);
+                }
+                _ => {}
+            }
+        }
+        self.apply(function, args)
+    }
+    fn amend_name(
+        &mut self,
+        op: char,
+        name: &Rc<str>,
+        selector: &Value,
+        f: &Value,
+        y: Option<&Value>,
+        scope: &mut Scope,
+    ) -> Result<Value> {
+        let target = self
+            .lookup_name(name, scope)
+            .ok_or_else(|| undefined(name))?;
+        let amended = self.amend_or_trap(op, &target, selector, f, y)?;
+        let selectors = if op == '.' {
+            items(selector).iter().collect::<Vec<_>>()
+        } else {
+            vec![selector.clone()]
+        };
+        if selectors.is_empty() {
+            self.assign_name(name, amended, scope);
+        } else {
+            target.update(&selectors, &index_depth(&amended, &selectors)?)?;
+        }
+        Ok(Value::Symbol(name.clone()))
+    }
+    /// Apply with argument holes: index containers or project functions.
+    fn project(&mut self, function: &Node, args: &[Node], scope: &mut Scope) -> Result<Value> {
+        let mut values = Vec::with_capacity(args.len());
+        for arg in args.iter().rev() {
+            values.push(match arg {
+                Node::Hole => None,
+                arg => Some(self.eval(arg, scope)?),
+            });
+        }
+        values.reverse();
+        let function = self.eval(function, scope)?;
+        if matches!(
+            function,
+            Value::Array(_) | Value::String(_) | Value::Dictionary(_) | Value::Table(_)
+        ) {
+            let indices = values
+                .into_iter()
+                .map(|v| v.unwrap_or_else(|| Value::function(FunctionKind::Verb(':'))))
+                .collect::<Vec<_>>();
+            index_depth(&function, &indices)
+        } else {
+            Ok(Value::function(FunctionKind::Projection(function, values)))
+        }
+    }
+    fn table(&mut self, columns: &[(Rc<str>, Node)], scope: &mut Scope) -> Result<Value> {
+        let mut values = Vec::with_capacity(columns.len());
+        for (name, node) in columns.iter().rev() {
+            let Value::Array(column) = self.eval(node, scope)? else {
+                return Err(format!("table column {name} must be an array"));
+            };
+            values.push((name.clone(), column));
+        }
+        values.reverse();
+        Table::new(values).map(Value::Table)
+    }
+    fn update(
+        &mut self,
+        var: &Var,
+        indices: &[Node],
+        value: &Node,
+        scope: &mut Scope,
+    ) -> Result<Value> {
+        let value = self.eval(value, scope)?;
+        let mut selectors = Vec::with_capacity(indices.len());
+        for index in indices.iter().rev() {
+            selectors.push(self.eval(index, scope)?);
+        }
+        selectors.reverse();
+        self.read(var, scope)?.update(&selectors, &value)?;
+        Ok(value)
+    }
+    fn append(&mut self, target: &Node, value: &Node, scope: &mut Scope) -> Result<Value> {
+        let value = self.eval(value, scope)?;
+        let target = self.eval(target, scope)?;
+        match &target {
+            Value::Array(array) => array.append(value)?,
+            Value::Table(table) => match value {
+                Value::Table(source) => table.append(&source)?,
+                _ => return Err("table append requires a table".into()),
+            },
+            Value::String(string) => {
+                let bytes = match value {
+                    Value::Char(c) => vec![c],
+                    Value::String(s) => s.snapshot().as_ref().clone(),
+                    _ => return Err("string append requires a character or string".into()),
+                };
+                string.append(bytes);
+            }
+            _ => return Err("in-place append requires an array or string".into()),
+        }
+        Ok(target)
+    }
+    fn modify(
+        &mut self,
+        target: &Node,
+        op: char,
+        value: &Node,
+        scope: &mut Scope,
+    ) -> Result<Value> {
+        let right = self.eval(value, scope)?;
+        let mut base = target;
+        let mut selectors = Vec::new();
+        while let Node::Call(function, args, _) = base {
+            for arg in args.iter().rev() {
+                selectors.push(self.eval(arg, scope)?);
+            }
+            base = function;
+        }
+        selectors.reverse();
+        let Node::Name(var) = base else {
+            return Err("assignment target must be a variable or indexed variable".into());
+        };
+        let container = self.read(var, scope)?;
+        if selectors.is_empty() {
+            let result = self.dyad(op, &container, &right)?;
+            self.store(var, result.clone(), scope);
+            Ok(result)
+        } else {
+            let amended = container.detached();
+            self.amend_path(
+                &amended,
+                &selectors,
+                &Value::function(FunctionKind::Verb(op)),
+                Some(&right),
+            )?;
+            let replacement = index_depth(&amended, &selectors)?;
+            container.update(&selectors, &replacement)?;
+            Ok(replacement)
+        }
+    }
+    /// Function and primitive applications share one depth limit.
+    fn nested(&mut self, run: impl FnOnce(&mut Self) -> Result<Value>) -> Result<Value> {
         if self.depth >= 128 {
             return Err("function call depth limit exceeded".into());
         }
         self.depth += 1;
-        let result = self.apply_inner(function, args);
+        let result = run(self);
         self.depth -= 1;
         result
+    }
+    pub(crate) fn apply(&mut self, function: &Value, args: &[Value]) -> Result<Value> {
+        self.nested(|this| this.apply_inner(function, args))
     }
     fn apply_inner(&mut self, function: &Value, args: &[Value]) -> Result<Value> {
         if let Value::Dictionary(dictionary) = function {
@@ -502,49 +567,57 @@ impl Evaluator {
                 self.round(value, places as u32)
             }
             FunctionKind::User {
-                name,
-                params,
-                body,
-                env,
+                proto,
+                captures,
+                self_slot,
+                ..
             } => {
-                if args.len() < params.len() {
+                if args.len() < proto.params {
                     let mut slots = args.iter().cloned().map(Some).collect::<Vec<_>>();
-                    slots.resize(params.len(), None);
+                    slots.resize(proto.params, None);
                     return Ok(Value::function(FunctionKind::Projection(
                         Value::Function(function.clone()),
                         slots,
                     )));
                 }
-                if params.len() != args.len() {
+                if proto.params != args.len() {
                     return Err(format!(
                         "function expects {} arguments, got {}",
-                        params.len(),
+                        proto.params,
                         args.len()
                     ));
                 }
-                if let [Expr::Call(f, operands)] = body.as_slice()
-                    && let Expr::Verb(op) = f.as_ref()
-                    && let Some(operation) = arithmetic(*op)
-                    && let [left, right] = operands.as_slice()
-                    && let Some(y) = numeric_argument(right, params, args)
-                    && let Some(x) = numeric_argument(left, params, args)
+                if let Some(arithmetic) = &proto.arithmetic
+                    && let Some((x, y)) = arithmetic.operands(args)
                 {
                     // The lambda call already consumed one depth level. Its
                     // primitive call consumes another, even without a frame.
                     if self.depth >= 128 {
                         return Err("function call depth limit exceeded".into());
                     }
-                    return operation(&x, &y).map(Value::from_number);
+                    return (arithmetic.operation)(&x, &y).map(Value::from_number);
                 }
-                let mut local = env.clone();
-                if let Some(name) = name {
-                    Rc::make_mut(&mut local)
-                        .insert(name.clone(), Value::Function(function.clone()));
+                let base = self.stack.len();
+                self.stack.extend(args.iter().cloned().map(Some));
+                self.stack.resize(base + proto.names.len(), None);
+                for (&slot, value) in proto.free.iter().zip(captures) {
+                    self.stack[base + slot] = value.clone();
                 }
-                for (param, arg) in params.iter().zip(args) {
-                    Rc::make_mut(&mut local).insert(param.clone(), arg.clone());
+                if let Some(slot) = self_slot {
+                    self.stack[base + slot] = Some(Value::Function(function.clone()));
                 }
-                let result = self.body(body, &mut local);
+                let frame = self.frames.len();
+                self.frames.push(None);
+                let result = self.body(
+                    &proto.body,
+                    &mut Scope::Local {
+                        base,
+                        frame,
+                        function,
+                    },
+                );
+                self.frames.pop();
+                self.stack.truncate(base);
                 self.returning.take().map_or(result, Ok)
             }
             FunctionKind::Derived(adverb, f) => match adverb {
@@ -705,6 +778,15 @@ impl Evaluator {
         }
     }
     fn unary_numeric(&mut self, op: char, y: &Value) -> Result<Value> {
+        // Empty and all-null results keep the untyped form element-wise
+        // evaluation gives them.
+        if let Value::Array(xs) = y
+            && let Some(numbers) = xs.numeric_snapshot()
+            && let Some(result) = crate::arrow::monad(op, &numbers)
+            && result.null_count() < result.len()
+        {
+            return Ok(Value::Array(Array::from_numbers(result)));
+        }
         match y {
             Value::Array(xs) => xs
                 .iter()
@@ -840,8 +922,8 @@ impl Evaluator {
             '.' => match y {
                 Value::Dictionary(d) => Ok(Value::from_array(d.values())),
                 Value::Array(_) | Value::Char(_) if y.as_text().is_some() => {
-                    let body = parser::parse(&y.as_text().unwrap())?;
-                    self.body(&body, &mut Rc::new(builtins()))
+                    let body = compile::program(&parser::parse(&y.as_text().unwrap())?);
+                    self.body(&body, &mut Scope::Global(&mut Rc::new(builtins())))
                 }
                 Value::Array(a) if !a.is_empty() => {
                     self.apply(&a.get(0).unwrap(), &a.iter().skip(1).collect::<Vec<_>>())
@@ -909,6 +991,15 @@ impl Evaluator {
         }
     }
     pub(crate) fn dyad(&mut self, op: char, x: &Value, y: &Value) -> Result<Value> {
+        // Scalar arithmetic reaches the same rule below; skip the structural checks.
+        if let (Value::Number(x), Value::Number(y)) = (x, y)
+            && matches!(
+                op,
+                '+' | '-' | '*' | '%' | 'm' | 'p' | '&' | '|' | '=' | '<' | '>'
+            )
+        {
+            return number_dyad(op, x, y);
+        }
         if !matches!(op, '$' | '@' | '.' | '~' | ':')
             && (matches!(x, Value::String(_)) || matches!(y, Value::String(_)))
         {
@@ -1089,21 +1180,22 @@ impl Evaluator {
                 Array::new(values)
             }
         };
+        if let (Value::Array(xs), Value::Array(ys)) = (x, y)
+            && xs.len() != ys.len()
+        {
+            return Err(format!("length mismatch: {} and {}", xs.len(), ys.len()));
+        }
+        if let Some(result) = vector_dyad(op, x, y) {
+            return result;
+        }
         match (x, y) {
-            (Value::Array(xs), Value::Array(ys)) => {
-                if xs.len() != ys.len() {
-                    return Err(format!("length mismatch: {} and {}", xs.len(), ys.len()));
-                }
-                if let Some(result) = xs.binary(ys, op) {
-                    return result.map(Value::Array);
-                }
-                xs.iter()
-                    .zip(ys.iter())
-                    .map(|(x, y)| self.dyad(op, &x, &y))
-                    .collect::<Result<Vec<_>>>()
-                    .and_then(result_array)
-                    .map(Value::from_array)
-            }
+            (Value::Array(xs), Value::Array(ys)) => xs
+                .iter()
+                .zip(ys.iter())
+                .map(|(x, y)| self.dyad(op, &x, &y))
+                .collect::<Result<Vec<_>>>()
+                .and_then(result_array)
+                .map(Value::from_array),
             (Value::Array(xs), y) => xs
                 .iter()
                 .map(|x| self.dyad(op, &x, y))
@@ -1116,25 +1208,7 @@ impl Evaluator {
                 .collect::<Result<Vec<_>>>()
                 .and_then(result_array)
                 .map(Value::from_array),
-            (Value::Number(x), Value::Number(y))
-                if op == 'm' && x.is_integer() && y.is_integer() && y.is_zero() =>
-            {
-                Ok(Value::Null)
-            }
-            (Value::Number(x), Value::Number(y)) => Ok(Value::from_number(match op {
-                '+' => x.add(y)?,
-                '-' => x.subtract(y)?,
-                '*' => x.multiply(y)?,
-                '%' => x.divide(y)?,
-                'm' => x.remainder(y)?,
-                'p' => x.power(y)?,
-                '&' => x.minimum(y),
-                '|' => x.maximum(y),
-                '=' => return Ok(boolean(x.equivalent(y))),
-                '<' => return Ok(boolean(!x.equivalent(y) && x < y)),
-                '>' => return Ok(boolean(!x.equivalent(y) && x > y)),
-                _ => return Err(format!("unknown operator: {op}")),
-            })),
+            (Value::Number(x), Value::Number(y)) => number_dyad(op, x, y),
             (Value::Null, _) | (_, Value::Null) => match op {
                 '=' => Ok(boolean(matches!((x, y), (Value::Null, Value::Null)))),
                 '<' => Ok(boolean(
@@ -1186,6 +1260,42 @@ impl Evaluator {
             _ => Err(format!("{op} requires numbers or arrays of numbers")),
         }
     }
+}
+
+/// Elementwise numeric primitives on Arrow vectors, broadcasting scalars.
+fn vector_dyad(op: char, x: &Value, y: &Value) -> Option<Result<Value>> {
+    let len = match (x, y) {
+        (Value::Array(a), _) | (_, Value::Array(a)) => a.len(),
+        _ => return None,
+    };
+    let operand = |value: &Value| match value {
+        Value::Array(a) => a.numeric_snapshot().map(Operand::Vector),
+        Value::Number(n) => Some(Operand::Number(*n)),
+        Value::Null => Some(Operand::Null),
+        _ => None,
+    };
+    let result = crate::arrow::dyad(op, &operand(x)?, &operand(y)?, len)?;
+    Some(result.map(|numbers| Value::Array(Array::from_numbers(numbers))))
+}
+
+fn number_dyad(op: char, x: &Number, y: &Number) -> Result<Value> {
+    if op == 'm' && x.is_integer() && y.is_integer() && y.is_zero() {
+        return Ok(Value::Null);
+    }
+    Ok(Value::from_number(match op {
+        '+' => x.add(y)?,
+        '-' => x.subtract(y)?,
+        '*' => x.multiply(y)?,
+        '%' => x.divide(y)?,
+        'm' => x.remainder(y)?,
+        'p' => x.power(y)?,
+        '&' => x.minimum(y),
+        '|' => x.maximum(y),
+        '=' => return Ok(boolean(x.equivalent(y))),
+        '<' => return Ok(boolean(!x.equivalent(y) && x < y)),
+        '>' => return Ok(boolean(!x.equivalent(y) && x > y)),
+        _ => return Err(format!("unknown operator: {op}")),
+    }))
 }
 
 pub(crate) fn boolean(b: bool) -> Value {
@@ -1323,7 +1433,7 @@ use crate::operators::{builtins, type_code};
 
 pub(crate) fn unary_function(f: &Value) -> bool {
     matches!(f, Value::Function(f) if match &f.kind {
-        FunctionKind::User { params, .. } => params.len() == 1,
+        FunctionKind::User { proto, .. } => proto.params == 1,
         FunctionKind::Monadic(_) => true,
         FunctionKind::Native(name) => !matches!(*name, "mod" | "pow"),
         FunctionKind::Projection(_, args) => args.iter().filter(|v| v.is_none()).count() == 1,

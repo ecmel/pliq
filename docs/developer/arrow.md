@@ -3,7 +3,8 @@
 [Developer guide](index.md) · [Rust API](rust-api.md) · [Architecture](architecture.md)
 
 pliq uses Apache Arrow 58's native Rust implementation. `arrow-array` owns vector
-buffers and `arrow-arith` supplies typed kernels. Rust 1.88 remains the minimum.
+buffers, `arrow-buffer` supplies validity and bit-packed buffers, and
+`arrow-arith` supplies typed kernels. Rust 1.88 remains the minimum.
 
 ## Storage and operations
 
@@ -19,13 +20,22 @@ existing shared byte storage. These values do not yet have Arrow import/export.
 Tables hold named shared arrays and support Arrow record-batch interchange.
 Parquet file I/O, device I/O, and streaming are not implemented.
 
-Same-type integer vector addition, subtraction, and multiplication use Arrow
-kernels with wrapping arithmetic. Same-type float vectors additionally use an
-IEEE division kernel. Other operators, scalar broadcasting, and mixed numeric
-operand types use pliq's evaluator over Arrow-backed input/output. Numeric
-reductions and scans iterate Arrow snapshots directly. There is no expression
-fusion or automatic parallel execution, and no performance improvement is
-claimed without measurement.
+Elementwise numeric primitives run as Arrow kernels on numeric vectors, with
+a number or `0n` on either side broadcast across the vector: `+ - * %`, `mod`,
+`pow`, minimum `&`, maximum `|`, fill `^`, and comparisons `= < >`, plus unary
+`-`, `%`, `_`, and `~`. Operands of mixed types convert to the result's domain
+first: booleans to integers, and anything with a float, `%`, or `pow` to
+floats. Results keep the rules for applying the primitive to each pair of
+elements: integer arithmetic wraps, undefined float results and integer `mod`
+by zero are null, arithmetic and `&` propagate nulls, `|` and `^` keep the
+valid side, comparisons treat null as less than any number, and float equality
+is tolerant. Nested arrays and arrays of runtime values still apply the
+primitive element by element, reaching the kernels for any numeric children.
+
+Numeric reductions and scans iterate Arrow snapshots directly. There is no
+expression fusion or automatic parallel execution, and no performance
+improvement is claimed without measurement; `cargo bench` includes vector
+arithmetic, scalar broadcasting, comparison, and mixed-type cases.
 
 Cloning an array retains shared mutable identity. Indexed updates and appends
 must preserve its element type and build replacement storage before committing.

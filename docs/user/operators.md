@@ -95,7 +95,7 @@ null right-hand elements with the left-hand value; dictionaries align by key.
 ```pliq
 ^1 0n 3                   // => 0 1 0
 2^1 0n 3                  // => 1 2 3
-`x^`a`                    // => `a`x
+`x^(`a;0n)                // => `a`x
 ```
 
 ## `#`: count, take, and reshape

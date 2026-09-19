@@ -163,17 +163,20 @@ impl Number {
         if let (Some(a), Some(b)) = (self.as_i64(), other.as_i64()) {
             return a == b;
         }
-        let a = self.as_f64();
-        let b = other.as_f64();
-        a == b
-            || (a.is_finite()
-                && b.is_finite()
-                && (a - b).abs() <= COMPARISON_TOLERANCE * a.abs().max(b.abs()))
+        equivalent_floats(self.as_f64(), other.as_f64())
     }
     pub(crate) fn same(&self, other: &Self) -> bool {
         self.type_code() == other.type_code() && self.equivalent(other)
     }
 }
+/// Tolerant float equality for language comparisons.
+pub(crate) fn equivalent_floats(a: f64, b: f64) -> bool {
+    a == b
+        || (a.is_finite()
+            && b.is_finite()
+            && (a - b).abs() <= COMPARISON_TOLERANCE * a.abs().max(b.abs()))
+}
+
 impl PartialEq for Number {
     fn eq(&self, other: &Self) -> bool {
         self.cmp(other) == Ordering::Equal

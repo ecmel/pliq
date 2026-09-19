@@ -177,3 +177,74 @@ fn an_attached_session_sees_daemon_state() {
     .unwrap();
     assert!(String::from_utf8(output).unwrap().contains("42"));
 }
+
+#[test]
+fn attached_sessions_limit_results_to_their_console_size() {
+    let address = daemon();
+    let mut output = Vec::new();
+    attach(
+        &address,
+        &b"\\c 6 20\n!1000\n([] a:!10)\n\\c 0 0\n!30\n\\q\n"[..],
+        &mut output,
+        &mut Vec::new(),
+    )
+    .unwrap();
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("  0 1 2 3 4 5 6 7 8 ..\n"), "{output}");
+    assert!(output.contains("a\n-\n0\n1\n..\n10 rows\n"), "{output}");
+    assert!(output.contains("27 28 29\n"), "{output}");
+}
+
+#[test]
+fn console_requests_carry_their_size_before_the_source() {
+    let address = daemon();
+    let mut client = connect(&address);
+    let mut payload = Vec::new();
+    payload.extend(6u32.to_le_bytes());
+    payload.extend(20u32.to_le_bytes());
+    payload.extend(b"!1000");
+    write_frame(&mut client, MODE_CONSOLE, &payload).unwrap();
+    let frame = read_frame(&mut client).unwrap().unwrap();
+    assert_eq!(frame.kind, TAG_OK);
+    assert_eq!(frame.payload, b"0 1 2 3 4 5 6 7 8 ..");
+
+    write_frame(&mut client, MODE_CONSOLE, &[6, 0, 0]).unwrap();
+    let frame = read_frame(&mut client).unwrap().unwrap();
+    assert_eq!(frame.kind, TAG_ERROR);
+    assert!(String::from_utf8_lossy(&frame.payload).contains("missing its size"));
+
+    // Text requests still return the whole result.
+    assert_eq!(request(&mut client, "#$!1000").0, TAG_OK);
+    assert_eq!(request(&mut client, "!30").1.len(), 79);
+}
+
+#[test]
+fn attached_sessions_fall_back_to_text_requests_for_older_daemons() {
+    // Answer as version 0.1.0 did: only text requests are evaluated.
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    let modes = thread::spawn(move || {
+        let (mut stream, _) = listener.accept().unwrap();
+        let mut modes = Vec::new();
+        while let Some(frame) = read_frame(&mut stream).unwrap() {
+            modes.push(frame.kind);
+            if frame.kind == MODE_TEXT {
+                let mut answer = b"old ".to_vec();
+                answer.extend(frame.payload.trim_ascii_end());
+                write_frame(&mut stream, TAG_OK, &answer).unwrap();
+            } else {
+                let refusal = format!("unsupported request mode: {}", frame.kind);
+                write_frame(&mut stream, TAG_ERROR, refusal.as_bytes()).unwrap();
+            }
+        }
+        modes
+    });
+    let mut output = Vec::new();
+    let mut errors = Vec::new();
+    attach(&address, &b"1+1\n2+2\n\\q\n"[..], &mut output, &mut errors).unwrap();
+    let output = String::from_utf8(output).unwrap();
+    assert!(output.contains("old 1+1\n"), "{output}");
+    assert!(output.contains("old 2+2\n"), "{output}");
+    assert!(errors.is_empty(), "{}", String::from_utf8_lossy(&errors));
+    assert_eq!(modes.join().unwrap(), [MODE_CONSOLE, MODE_TEXT, MODE_TEXT]);
+}

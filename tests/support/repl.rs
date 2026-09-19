@@ -35,7 +35,7 @@ fn repl_keeps_state_and_recovers_after_errors() {
 
 #[test]
 fn repl_multiline_comments_and_clear() {
-    let (out, err, result) = session("f:{\nx+1 // } ignored\n}\nf 4\n(\n\\c\n7\n\\q\n");
+    let (out, err, result) = session("f:{\nx+1 // } ignored\n}\nf 4\n(\n\\d\n7\n\\q\n");
     result.unwrap();
     assert!(out.contains(".."));
     assert!(out.contains("5\n"));
@@ -48,9 +48,10 @@ fn repl_help_preserves_pending_input_and_bindings() {
     let (out, err, result) = session("\\h\na:4\n(a+\n  \\h  \n2)\na\n\\q\n");
     result.unwrap();
     assert!(err.is_empty(), "{err}");
-    assert_eq!(out.matches("\\h  Show this help").count(), 2);
-    assert!(out.contains("\\c  Discard pending input"));
-    assert!(out.contains("\\q  Exit"));
+    assert_eq!(out.matches("\\h               Show this help").count(), 2);
+    assert!(out.contains("\\c rows columns  Set it: 5 to 1000 rows"));
+    assert!(out.contains("\\d               Discard pending input"));
+    assert!(out.contains("\\q               Exit"));
     assert!(out.contains("..6\n  4\n"), "{out}");
 }
 
@@ -66,7 +67,7 @@ fn repl_multiline_returns_do_not_collide_with_commands() {
 
 #[test]
 fn repl_clear_preserves_bindings() {
-    let (out, err, result) = session("a:7\n(a:9;\n \\c \na\n\\q\n");
+    let (out, err, result) = session("a:7\n(a:9;\n \\d \na\n\\q\n");
     result.unwrap();
     assert!(err.is_empty(), "{err}");
     assert!(out.contains("..  7\n"), "{out}");
@@ -80,6 +81,75 @@ fn repl_long_commands_are_no_longer_recognized() {
         assert!(err.contains("error:"), "{command}: {err}");
         assert!(out.contains("  42\n"), "{command}: {out}");
     }
+}
+
+#[test]
+fn repl_console_size_limits_results_but_not_errors() {
+    let message = "a long error message that is wider than twenty columns";
+    let (out, err, result) = session(&format!(
+        "\\c\n\\c 6 20\n\\c\n!1000\n([] a:!10)\n(!10)!!10\n'\"{message}\"\n\\q\n"
+    ));
+    result.unwrap();
+    // Piped input has no width limit until one is set.
+    assert!(out.contains("  1000 0 (auto)\n"), "{out}");
+    assert!(out.contains("  6 20\n"), "{out}");
+    assert!(out.contains("  0 1 2 3 4 5 6 7 8 ..\n"), "{out}");
+    assert!(out.contains("  a\n-\n0\n1\n..\n10 rows\n"), "{out}");
+    assert!(
+        out.contains("  0 | 0\n1 | 1\n2 | 2\n3 | 3\n..\n10 entries\n"),
+        "{out}"
+    );
+    assert!(err.contains(message), "{err}");
+}
+
+#[test]
+fn repl_console_size_commands_keep_pending_input() {
+    let (out, err, result) =
+        session("\\c 5 20\n(1+\n\\c 0 0\n2)\n!30\n\\c 5 20\n\\c auto\n\\c\n!30\n\\q\n");
+    result.unwrap();
+    assert!(err.is_empty(), "{err}");
+    assert!(out.contains("..3\n"), "{out}");
+    assert_eq!(
+        out.matches(
+            "0 1 2 3 4 5 6 7 8 9 10 11 12 13 14 15 16 17 18 19 20 21 22 23 24 25 26 27 28 29\n"
+        )
+        .count(),
+        2,
+        "{out}"
+    );
+    assert!(out.contains("  1000 0 (auto)\n"), "{out}");
+}
+
+#[test]
+fn repl_results_never_exceed_1000_rows() {
+    let (out, err, result) = session("\\c 0 0\n\\c\n([] a:!2000)\n(!1500)!!1500\n\\q\n");
+    result.unwrap();
+    assert!(err.is_empty(), "{err}");
+    assert!(out.contains("  1000 0\n"), "{out}");
+    let table = out.split("  a\n").nth(1).unwrap();
+    let table = &table[..table.find("2000 rows").unwrap() + "2000 rows".len()];
+    assert_eq!(table.lines().count(), 999, "{table}");
+    assert!(table.ends_with("995\n..\n2000 rows"), "{table}");
+    assert!(out.contains("997 | 997\n..\n1500 entries\n"), "{out}");
+}
+
+#[test]
+fn repl_console_size_rejects_invalid_sizes() {
+    let (out, err, result) =
+        session("\\c 4 20\n\\c 5 19\n\\c 1001 80\n\\c 5\n\\c a b\n\\c 1 2 3\n\\c\n\\q\n");
+    result.unwrap();
+    assert_eq!(
+        err.matches("5 to 1000 rows (0 for 1000) and at least 20 columns (0 for no limit)")
+            .count(),
+        3,
+        "{err}"
+    );
+    assert_eq!(
+        err.matches("usage: \\c [rows columns | auto]").count(),
+        3,
+        "{err}"
+    );
+    assert!(out.contains("  1000 0 (auto)\n"), "{out}");
 }
 
 #[test]
@@ -219,7 +289,7 @@ fn repl_records_complete_expressions_including_errors_but_not_cancelled_input() 
     repl_io(
         &mut Interpreter::new(),
         Recording {
-            lines: "\n(1+\n\\h\n2)\nmissing\n(\n\\c\n(\n\\q\n".lines(),
+            lines: "\n(1+\n\\h\n2)\nmissing\n(\n\\d\n(\n\\q\n".lines(),
             history: &mut history,
         },
         &mut Vec::new(),

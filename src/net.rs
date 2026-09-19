@@ -9,6 +9,9 @@ use std::io::{self, Read, Write};
 /// Request encoding. Source text in, printed output back.
 /// Reserved for later encodings: 1 for JSON, 2 for Arrow IPC.
 pub(crate) const MODE_TEXT: u8 = 0;
+/// Like text, with the source preceded by the client's console rows and columns
+/// as little-endian `u32`s; zero leaves a dimension unlimited.
+pub(crate) const MODE_CONSOLE: u8 = 3;
 
 /// Response kinds.
 pub(crate) const TAG_OK: u8 = 0;
@@ -17,9 +20,12 @@ pub(crate) const TAG_ERROR: u8 = 1;
 /// Caps the allocation a single frame header can request.
 const MAX_FRAME: usize = 16 << 20;
 
-const ATTACH_HELP: &str = r#"  \h  Show this help; keep pending input
-  \c  Discard pending input
-  \q  Detach; the daemon keeps running
+const ATTACH_HELP: &str = r#"  \h               Show this help; keep pending input
+  \c               Show the console size for results
+  \c rows columns  Set it: 5 to 1000 rows, 20 or more columns; 0 for the most
+  \c auto          Show up to 1000 rows at the terminal's width (the default)
+  \d               Discard pending input
+  \q               Detach; the daemon keeps running
 "#;
 
 /// A length-prefixed message: `[u32 little-endian length][u8 kind][payload]`,
@@ -75,8 +81,7 @@ use std::{
     thread,
 };
 
-use crate::Output;
-use pliq::Interpreter;
+use pliq::{Console, Interpreter};
 
 /// One evaluation request and the channel its answer goes back on.
 struct Request {
@@ -131,17 +136,31 @@ fn serve(interpreter: &mut Interpreter, listener: TcpListener) -> io::Result<()>
 }
 
 fn evaluate(interpreter: &mut Interpreter, request: &Request) -> (u8, Vec<u8>) {
-    if request.mode != MODE_TEXT {
-        return (
-            TAG_ERROR,
-            format!("unsupported request mode: {}", request.mode).into_bytes(),
-        );
-    }
-    let Ok(source) = std::str::from_utf8(&request.payload) else {
+    let (console, source) = match request.mode {
+        MODE_TEXT => (Console::UNLIMITED, &request.payload[..]),
+        MODE_CONSOLE if request.payload.len() >= 8 => {
+            let (size, source) = request.payload.split_at(8);
+            let number =
+                |bytes: &[u8]| u32::from_le_bytes(bytes.try_into().expect("four bytes")) as usize;
+            let console = Console {
+                rows: number(&size[..4]),
+                columns: number(&size[4..]),
+            };
+            (console, source)
+        }
+        MODE_CONSOLE => return (TAG_ERROR, b"console request is missing its size".to_vec()),
+        mode => {
+            return (
+                TAG_ERROR,
+                format!("unsupported request mode: {mode}").into_bytes(),
+            );
+        }
+    };
+    let Ok(source) = std::str::from_utf8(source) else {
         return (TAG_ERROR, b"request is not valid UTF-8".to_vec());
     };
     let (tag, payload) = match interpreter.eval(source) {
-        Ok(value) => (TAG_OK, Output(value).to_string().into_bytes()),
+        Ok(value) => (TAG_OK, value.view(console).to_string().into_bytes()),
         Err(error) => (TAG_ERROR, error.into_bytes()),
     };
     // A frame that cannot be written would otherwise drop the connection with
@@ -200,6 +219,10 @@ pub(crate) fn attach(
         "pliq attached to {address}. \\h for help, \\q to detach."
     )?;
     let mut source = String::new();
+    let mut size = crate::Size::default();
+    // Daemons from 0.1.0 refuse console requests without evaluating them;
+    // repeat the request as text and keep using text for them.
+    let mut console_requests = true;
     loop {
         let prompt = if source.is_empty() { "  " } else { ".." };
         let Some(line) = input.line(prompt, output)? else {
@@ -214,12 +237,21 @@ pub(crate) fn attach(
                 write!(output, "{ATTACH_HELP}")?;
                 continue;
             }
-            "\\c" => {
+            "\\d" => {
                 source.clear();
                 continue;
             }
             "" if source.is_empty() => continue,
-            _ => {}
+            command => {
+                if let Some(args) = crate::console_command(command) {
+                    match size.command(args, &mut input) {
+                        Ok(Some(text)) => writeln!(output, "{text}")?,
+                        Ok(None) => {}
+                        Err(error) => writeln!(errors, "error: {error}")?,
+                    }
+                    continue;
+                }
+            }
         }
         source.push_str(&line);
         source.push('\n');
@@ -227,9 +259,17 @@ pub(crate) fn attach(
             continue;
         }
         input.remember(&source);
-        write_frame(&mut stream, MODE_TEXT, source.as_bytes())?;
+        let console = size.console(&mut input);
+        let mut answer = send(&mut stream, console_requests.then_some(console), &source)?;
+        if console_requests
+            && matches!(&answer, Some(frame) if frame.kind == TAG_ERROR
+                && frame.payload == format!("unsupported request mode: {MODE_CONSOLE}").as_bytes())
+        {
+            console_requests = false;
+            answer = send(&mut stream, None, &source)?;
+        }
         source.clear();
-        match read_frame(&mut stream)? {
+        match answer {
             Some(frame) if frame.kind == TAG_OK => {
                 writeln!(output, "{}", String::from_utf8_lossy(&frame.payload))?;
             }
@@ -249,6 +289,27 @@ pub(crate) fn attach(
         ));
     }
     Ok(())
+}
+
+/// Send one request, as a console request when a console is given, and read
+/// its answer.
+fn send(
+    stream: &mut TcpStream,
+    console: Option<Console>,
+    source: &str,
+) -> io::Result<Option<Frame>> {
+    match console {
+        Some(console) => {
+            let mut payload = Vec::with_capacity(8 + source.len());
+            for n in [console.rows, console.columns] {
+                payload.extend(u32::try_from(n).unwrap_or(u32::MAX).to_le_bytes());
+            }
+            payload.extend_from_slice(source.as_bytes());
+            write_frame(stream, MODE_CONSOLE, &payload)?;
+        }
+        None => write_frame(stream, MODE_TEXT, source.as_bytes())?,
+    }
+    read_frame(stream)
 }
 
 #[cfg(test)]

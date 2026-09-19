@@ -5,6 +5,38 @@ Notable changes to pliq, newest first. The format follows
 
 ## [Unreleased]
 
+### Added
+
+- REPL results fit a console size: never more than 1000 rows, at the
+  terminal's width by default. Cut lines end in `..`, and tall tables and
+  dictionaries end in `..` and their row or entry count. `\c rows columns` sets
+  5 to 1000 rows and at least 20 columns, with `0` for the most, so `\c 0 0`
+  shows up to 1000 rows at any width. `\c` shows the size, and `\c auto`
+  restores the default. Error messages and output from `-e`, files, and piped
+  input are never cut.
+- Attached REPLs send their console size with each request (request mode `3`),
+  so the daemon renders only what fits, and fall back to text requests with
+  0.1.0 daemons.
+- `Value::view(Console)` renders a value within a console size from Rust.
+
+### Changed
+
+- `\d` now discards pending REPL input, including on Ctrl-C; `\c` sets the
+  console size.
+
+- Calls to user-defined functions are about 5 to 9 times faster. Function
+  bodies resolve their names to call-frame slots before evaluation, so calls no
+  longer copy a closure's captured bindings, and primitive applications and
+  literal vectors no longer rebuild their values on each evaluation.
+- Numeric vector operations run as Arrow kernels for every elementwise
+  arithmetic, comparison, minimum, maximum, and fill primitive, including a
+  scalar on either side and mixed boolean, integer, and float types, and for
+  unary `-`, `%`, `_`, and `~`. `a*2` and `a<5` on a million integers take
+  under 1 ms instead of about 30 ms, with unchanged results.
+- Release binaries are about half their previous size and run function calls
+  about 15% faster, from link-time optimization, size-optimized code, and
+  stripped symbols.
+
 ## [0.1.0] - 2026-09-19
 
 ### Added

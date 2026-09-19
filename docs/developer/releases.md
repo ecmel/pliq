@@ -45,7 +45,11 @@ so both architectures build and run tests on native ARM64 runners.
 macOS x86-64 uses the Intel runner `macos-15-intel`.
 
 Each build installs stable Rust, runs release tests with the lockfile, builds
-the binary, and packages it with `LICENSE` and `README.md`. The current archives
+the binary, and packages it with `LICENSE` and `README.md`. The release profile
+in `Cargo.toml` uses fat LTO, one codegen unit, `panic = "abort"`, stripped
+symbols, and `opt-level = "s"`, which measured smaller and faster for
+interpreted calls than the defaults; compare `cargo bench` results when changing
+it. The current archives
 do not bundle the full `docs/` tree. The normal workflow tests skip ignored tests.
 
 The publishing job checks tag/version agreement, requires a nonempty matching

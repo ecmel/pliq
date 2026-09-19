@@ -5,12 +5,19 @@ use std::{
     path::PathBuf,
 };
 
+use pliq::Console;
 use rustyline::{DefaultEditor, error::ReadlineError};
 
 pub(crate) trait Input {
     fn line(&mut self, prompt: &str, output: &mut impl Write) -> io::Result<Option<String>>;
 
     fn remember(&mut self, _source: &str) {}
+
+    /// The console size for results unless `\c` sets one. Piped input has no
+    /// width limit; the REPL still caps rows.
+    fn console(&mut self) -> Console {
+        Console::UNLIMITED
+    }
 }
 
 impl<R: BufRead> Input for R {
@@ -52,8 +59,17 @@ impl Input for Terminal {
         match self.editor.readline(prompt) {
             Ok(line) => Ok(Some(line)),
             Err(ReadlineError::Eof) => Ok(None),
-            Err(ReadlineError::Interrupted) => Ok(Some("\\c".into())),
+            Err(ReadlineError::Interrupted) => Ok(Some("\\d".into())),
             Err(error) => Err(io::Error::other(error)),
+        }
+    }
+
+    fn console(&mut self) -> Console {
+        // Keep the last column free for terminals that wrap as soon as it fills.
+        let width = self.editor.dimensions().map_or(80, |(width, _)| width);
+        Console {
+            rows: crate::ROWS,
+            columns: usize::from(width).saturating_sub(1).max(crate::MIN_COLUMNS),
         }
     }
 
