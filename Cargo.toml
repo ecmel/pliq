@@ -1,0 +1,17 @@
+[package]
+name = "pliq"
+version = "0.1.0"
+edition = "2024"
+rust-version = "1.88"
+description = "Array Language"
+license = "MIT"
+publish = false
+
+[package.metadata]
+authors = ["Ecmel Ercan"]
+
+[dependencies]
+arrow-arith = "58"
+arrow-array = "58"
+arrow-schema = "58"
+rustyline = { version = "18", default-features = false, features = ["with-file-history"] }

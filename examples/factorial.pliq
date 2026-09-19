@@ -1,0 +1,3 @@
+// Lazy branches allow recursive functions.
+fact:{$[x<2;1;x*fact[x-1]]}
+fact'[!11]

@@ -1,0 +1,16 @@
+// Rates and amounts share currency labels; lookup selects matching rates.
+rates:`USD`EUR`TRY!1 1.08 0.029
+amounts:`USD`EUR`TRY!100 200 300
+
+// Dot access selects a literal symbol key, including in updates.
+usd:rates.USD
+rates.USD:usd
+
+// Dictionaries can also hold records with fields of different types.
+record:()!()
+record.name:"alice"
+record.count:0
+record.count+:1
+
+// Total after applying each rate: 324.7.
++/(.amounts)*rates[!amounts]

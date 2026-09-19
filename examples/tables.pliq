@@ -1,0 +1,6 @@
+// Shared, variable-length columns and aligned table append.
+t:([] name:`alice`bob; age:30 25)
+ages:t[`age]
+ages,:40
+t,:([] name:`cara`dan; age:28 35)
+t[&t[`age]>30]

@@ -1,0 +1,5 @@
+// Native floating-point arithmetic, integer precision, and floating powers.
+sum:+/0.1 0.2 0.3
+large:9007199254740993+1
+power:pow[2;80]
+(sum;large;power)

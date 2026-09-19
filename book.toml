@@ -1,0 +1,24 @@
+[book]
+title = "pliq"
+description = "A dependency-free array language in Rust."
+language = "en"
+src = "docs"
+
+[build]
+build-dir = "target/book"
+create-missing = false
+
+[rust]
+edition = "2024"
+
+[output.html]
+site-url = "/pliq/"
+git-repository-url = "https://github.com/ecmel/pliq"
+edit-url-template = "https://github.com/ecmel/pliq/edit/main/docs/{path}"
+no-section-label = true
+
+[output.html.playground]
+runnable = false
+
+[output.html.search]
+enable = true

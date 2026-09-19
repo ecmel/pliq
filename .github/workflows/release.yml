@@ -1,0 +1,130 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v[0-9]+.[0-9]+.[0-9]+"
+
+permissions:
+  contents: read
+
+defaults:
+  run:
+    shell: bash
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  build:
+    name: Build ${{ matrix.target }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+          - os: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+          - os: windows-11-arm
+            target: aarch64-pc-windows-msvc
+          - os: macos-15-intel
+            target: x86_64-apple-darwin
+          - os: macos-latest
+            target: aarch64-apple-darwin
+    env:
+      TARGET: ${{ matrix.target }}
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        run: |
+          rustup toolchain install stable --profile minimal --no-self-update --target "$TARGET"
+          rustup default stable
+
+      - name: Test
+        run: cargo test --release --locked --target "$TARGET"
+
+      - name: Build
+        run: cargo build --release --locked --target "$TARGET"
+
+      # Archive names carry no version, so the docs can link to the latest
+      # release's archives at releases/latest/download/<name>.
+      - name: Package
+        id: package
+        run: |
+          name="pliq-$TARGET"
+          mkdir "$name"
+          cp LICENSE README.md "$name/"
+          if [[ "$TARGET" == *-windows-* ]]; then
+            cp "target/$TARGET/release/pliq.exe" "$name/"
+            7z a "$name.zip" "$name"
+            echo "archive=$name.zip" >> "$GITHUB_OUTPUT"
+          else
+            cp "target/$TARGET/release/pliq" "$name/"
+            tar -czf "$name.tar.gz" "$name"
+            echo "archive=$name.tar.gz" >> "$GITHUB_OUTPUT"
+          fi
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: pliq-${{ matrix.target }}
+          path: ${{ steps.package.outputs.archive }}
+          if-no-files-found: error
+
+  release:
+    name: Publish release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Check version and extract notes
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          manifest=$(sed -n 's/^version = "\(.*\)"$/\1/p' Cargo.toml | head -n 1)
+          if [ "$manifest" != "$version" ]; then
+            echo "::error::Tag $GITHUB_REF_NAME does not match Cargo.toml version $manifest"
+            exit 1
+          fi
+          awk -v heading="## [$version]" '
+            index($0, heading) == 1 { found = 1; next }
+            found && (/^## / || /^\[.*\]: /) { exit }
+            found { print }
+          ' CHANGELOG.md > "$RUNNER_TEMP/notes.md"
+          if ! grep -q '[^[:space:]]' "$RUNNER_TEMP/notes.md"; then
+            echo "::error::CHANGELOG.md has no entries under ## [$version]"
+            exit 1
+          fi
+
+      - uses: actions/download-artifact@v8
+        with:
+          pattern: pliq-*
+          path: dist
+          merge-multiple: true
+
+      # Uploads to an existing release (created in the UI, or by a partial
+      # earlier run) instead of failing, so the job can be re-run safely.
+      - name: Create or update release
+        working-directory: dist
+        env:
+          GH_REPO: ${{ github.repository }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          sha256sum pliq-* > SHA256SUMS.txt
+          if gh release view "$GITHUB_REF_NAME" > /dev/null 2>&1; then
+            gh release upload "$GITHUB_REF_NAME" --clobber pliq-* SHA256SUMS.txt
+          else
+            gh release create "$GITHUB_REF_NAME" --verify-tag \
+              --title "pliq ${GITHUB_REF_NAME#v}" \
+              --notes-file "$RUNNER_TEMP/notes.md" \
+              pliq-* SHA256SUMS.txt
+          fi

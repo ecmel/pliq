@@ -1,0 +1,7 @@
+// Symbol labels are values, distinct from variable references.
+codes:`USD`EUR`TRY`USD
+amounts:100 200 300 50
+isUSD:{x=`USD}
+
+// Select and total the USD amounts: 150.
++/amounts@&isUSD codes

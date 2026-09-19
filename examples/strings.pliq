@@ -1,0 +1,7 @@
+// Strings share mutable byte storage through aliases and captured bindings.
+message:"plix"
+alias:message
+read:{[]message}
+message[3]:"q"
+message,:"!"
+(alias;read[])

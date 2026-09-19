@@ -1,0 +1,6 @@
+// Select evens, square them, and compute running totals.
+numbers:!10
+evens:numbers@&0=mod[numbers;2]
+squares:{x*x}'[evens]
+running:+\squares
+(evens;squares;running)

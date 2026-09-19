@@ -1,0 +1,41 @@
+// A small sales report: arrays, dictionaries, tables, aliases, and functions.
+// Run with: cargo run -- examples/demo.pliq
+
+// Build a table from existing arrays. The shorter note column reads as null.
+products:`tea`coffee`cocoa`matcha
+qty:3 4 5 1
+orders:([] product:products;
+           qty:qty;
+           price:4.0 6.0 3.0 8.0;
+           currency:`USD`EUR`USD`EUR;
+           note:,`featured)
+
+// A closure captures the shared table; usd will be added below.
+total:{+/orders[`usd]}
+
+// Mutate an original array: the table sees the new quantity.
+qty[0]:6
+
+// Append a row. Existing column aliases also see the appended data.
+orders,:([] product:,`tea; qty:,2; price:,4.0;
+            currency:,`USD; note:,`repeat)
+
+// Dictionary lookup and vector arithmetic convert every sale to USD.
+// These are illustrative exchange rates.
+rates:`USD`EUR!1.0 1.1
+orders[`usd]:round[orders[`qty]*orders[`price]*rates[orders[`currency]];2]
+orders[`percent]:round[100*orders[`usd]%total[];1]
+
+// Apply a function to each amount; $[...] selects a branch lazily.
+size:{$[x>20;`large;`small]}
+orders[`size]:size'orders[`usd]
+
+// Filter to multi-unit sales, then grade revenue to sort descending.
+report:orders[&orders[`qty]>1]
+report:report[>report[`usd]]
+
+// A scan computes running totals in report order.
+report[`running]:round[+\report[`usd];2]
+
+// The CLI prints the final table with aligned headers and rows.
+report[`product`qty`usd`percent`size`note`running]

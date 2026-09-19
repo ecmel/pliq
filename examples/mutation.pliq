@@ -1,0 +1,15 @@
+// Aliases and functions share the same array.
+items:10 20 30
+alias:items
+setFirst:{items[0]:x}
+setFirst[99]
+items[1 2]:7 8
+
+// Dictionary keys can be replaced or appended. Nested containers stay shared.
+record:(,`items)!,items
+record[`backup]:1 2
+record[`items][2]:9
+items,:4
+
+// (99 7 9 4;1 2)
+(alias;record[`backup])
